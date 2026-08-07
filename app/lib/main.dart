@@ -9,7 +9,9 @@ import 'package:permission_handler/permission_handler.dart';
 void main() => runApp(const Esp32App());
 
 class Esp32App extends StatelessWidget {
-  const Esp32App({super.key});
+  const Esp32App({super.key, this.requestBluetoothOnLaunch = true});
+
+  final bool requestBluetoothOnLaunch;
 
   @override
   Widget build(BuildContext context) {
@@ -23,13 +25,15 @@ class Esp32App extends StatelessWidget {
         ),
         useMaterial3: true,
       ),
-      home: const BleTerminalPage(),
+      home: BleTerminalPage(requestBluetoothOnLaunch: requestBluetoothOnLaunch),
     );
   }
 }
 
 class BleTerminalPage extends StatefulWidget {
-  const BleTerminalPage({super.key});
+  const BleTerminalPage({super.key, required this.requestBluetoothOnLaunch});
+
+  final bool requestBluetoothOnLaunch;
 
   @override
   State<BleTerminalPage> createState() => _BleTerminalPageState();
@@ -70,6 +74,25 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
         }
       });
     }, onError: (Object error) => _showError('Scan failed: $error'));
+
+    if (widget.requestBluetoothOnLaunch) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _requestBluetoothOnLaunch();
+      });
+    }
+  }
+
+  Future<void> _requestBluetoothOnLaunch() async {
+    try {
+      final granted = await _requestPermissions();
+      if (!granted) {
+        _showError(
+          'Bluetooth permission is required. Enable it in system settings.',
+        );
+      }
+    } catch (error) {
+      _showError('Could not request Bluetooth permission: $error');
+    }
   }
 
   Future<bool> _requestPermissions() async {
