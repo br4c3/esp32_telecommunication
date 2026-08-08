@@ -45,7 +45,6 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
   static final Guid _txId = Guid('6E400003-B5A3-F393-E0A9-E50E24DCCA9E');
 
   final _messageController = TextEditingController();
-  final _messages = <TerminalMessage>[];
   final _devices = <DeviceIdentifier, ScanResult>{};
 
   StreamSubscription<List<ScanResult>>? _scanSubscription;
@@ -57,6 +56,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
   bool _isConnecting = false;
   bool _isConnected = false;
   String? _error;
+  List<double> _pressures = List<double>.filled(6, 0);
 
   @override
   void initState() {
@@ -68,7 +68,9 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
           final name = result.device.platformName;
           final advertisesService = result.advertisementData.serviceUuids
               .contains(_serviceId);
-          if (name == 'ESP32-ADS1115' || advertisesService) {
+          if (name == 'ESP32-Pressure-6' ||
+              name == 'ESP32-ADS1115' ||
+              advertisesService) {
             _devices[result.device.remoteId] = result;
           }
         }
@@ -155,6 +157,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
         license: License.nonprofit,
         timeout: const Duration(seconds: 15),
       );
+      if (Platform.isAndroid) await device.requestMtu(64);
       _device = device;
       await _connectionSubscription?.cancel();
       _connectionSubscription = device.connectionState.listen((state) {
@@ -186,7 +189,8 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
       _notificationSubscription = tx.onValueReceived.listen((bytes) {
         if (!mounted) return;
         final text = utf8.decode(bytes, allowMalformed: true);
-        setState(() => _messages.insert(0, TerminalMessage.received(text)));
+        final frame = PressureFrame.tryParse(text);
+        if (frame != null) setState(() => _pressures = frame.values);
       });
       await tx.setNotifyValue(true);
       if (mounted) setState(() => _isConnected = true);
@@ -205,6 +209,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
       _device = null;
       _rxCharacteristic = null;
       _isConnected = false;
+      _pressures = List<double>.filled(6, 0);
     });
   }
 
@@ -215,7 +220,6 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
     try {
       await rx.write(utf8.encode(text), withoutResponse: false);
       if (!mounted) return;
-      setState(() => _messages.insert(0, TerminalMessage.sent(text)));
       _messageController.clear();
     } catch (error) {
       _showError('Send failed: $error');
@@ -240,7 +244,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('ESP32 BLE Terminal'),
+        title: const Text('ESP32 압력 모니터'),
         actions: [
           if (_isConnected)
             TextButton.icon(
@@ -317,22 +321,11 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
                 ),
               ] else ...[
                 Text(
-                  'Messages',
+                  '6개 압력 센서',
                   style: Theme.of(context).textTheme.titleMedium,
                 ),
                 const SizedBox(height: 8),
-                Expanded(
-                  child: _messages.isEmpty
-                      ? const Center(child: Text('Waiting for ESP32 data…'))
-                      : ListView.builder(
-                          reverse: true,
-                          itemCount: _messages.length,
-                          itemBuilder: (context, index) {
-                            final message = _messages[index];
-                            return _MessageBubble(message: message);
-                          },
-                        ),
-                ),
+                Expanded(child: PressureGrid(values: _pressures)),
                 const SizedBox(height: 8),
                 Row(
                   children: [
@@ -364,16 +357,126 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
   }
 }
 
-class TerminalMessage {
-  const TerminalMessage(this.text, this.isSent, this.timestamp);
-  factory TerminalMessage.sent(String text) =>
-      TerminalMessage(text, true, DateTime.now());
-  factory TerminalMessage.received(String text) =>
-      TerminalMessage(text, false, DateTime.now());
+class PressureFrame {
+  const PressureFrame(this.values);
 
-  final String text;
-  final bool isSent;
-  final DateTime timestamp;
+  final List<double> values;
+
+  static PressureFrame? tryParse(String packet) {
+    final text = packet.trim();
+    if (!text.startsWith('P:')) return null;
+    final parts = text.substring(2).split(',');
+    if (parts.length != 6) return null;
+    final values = <double>[];
+    for (final part in parts) {
+      final value = double.tryParse(part);
+      if (value == null || !value.isFinite || value < 0) return null;
+      values.add(value);
+    }
+    return PressureFrame(List.unmodifiable(values));
+  }
+}
+
+class PressureGrid extends StatelessWidget {
+  const PressureGrid({super.key, required this.values});
+
+  final List<double> values;
+  static const double displayMaximum = 2000;
+
+  @override
+  Widget build(BuildContext context) {
+    final sensorValues = List<double>.generate(
+      6,
+      (index) => index < values.length ? values[index] : 0,
+    );
+    return LayoutBuilder(
+      builder: (context, constraints) => GridView.builder(
+        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+          crossAxisCount: constraints.maxWidth > constraints.maxHeight ? 3 : 2,
+          crossAxisSpacing: 10,
+          mainAxisSpacing: 10,
+          childAspectRatio: 1.15,
+        ),
+        itemCount: sensorValues.length,
+        itemBuilder: (context, index) => _PressureTile(
+          sensorNumber: index + 1,
+          value: sensorValues[index],
+          maximum: displayMaximum,
+        ),
+      ),
+    );
+  }
+}
+
+class _PressureTile extends StatelessWidget {
+  const _PressureTile({
+    required this.sensorNumber,
+    required this.value,
+    required this.maximum,
+  });
+
+  final int sensorNumber;
+  final double value;
+  final double maximum;
+
+  @override
+  Widget build(BuildContext context) {
+    final intensity = (value / maximum).clamp(0.0, 1.0);
+    final color = Color.lerp(
+      const Color(0xffe0f2f1),
+      const Color(0xffd32f2f),
+      intensity,
+    )!;
+    final foreground = intensity > 0.58
+        ? Colors.white
+        : const Color(0xff172322);
+
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 80),
+      decoration: BoxDecoration(
+        color: color,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: color.withValues(alpha: 0.9), width: 2),
+        boxShadow: [
+          BoxShadow(
+            color: color.withValues(alpha: 0.28),
+            blurRadius: 10,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      padding: const EdgeInsets.all(14),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Text(
+            '센서 $sensorNumber',
+            style: Theme.of(context).textTheme.titleMedium?.copyWith(
+              color: foreground,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: 6),
+          FittedBox(
+            child: Text(
+              value.toStringAsFixed(0),
+              style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                color: foreground,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          LinearProgressIndicator(
+            value: intensity,
+            color: foreground,
+            backgroundColor: foreground.withValues(alpha: 0.2),
+            borderRadius: BorderRadius.circular(99),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _StatusCard extends StatelessWidget {
@@ -434,37 +537,4 @@ class _EmptyDevices extends StatelessWidget {
       ],
     ),
   );
-}
-
-class _MessageBubble extends StatelessWidget {
-  const _MessageBubble({required this.message});
-  final TerminalMessage message;
-
-  @override
-  Widget build(BuildContext context) {
-    final time =
-        '${message.timestamp.hour.toString().padLeft(2, '0')}:${message.timestamp.minute.toString().padLeft(2, '0')}:${message.timestamp.second.toString().padLeft(2, '0')}';
-    return Align(
-      alignment: message.isSent ? Alignment.centerRight : Alignment.centerLeft,
-      child: Card(
-        color: message.isSent
-            ? Theme.of(context).colorScheme.primaryContainer
-            : null,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(message.text),
-              const SizedBox(height: 3),
-              Text(
-                '${message.isSent ? 'Sent' : 'Received'} • $time',
-                style: Theme.of(context).textTheme.labelSmall,
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
 }
