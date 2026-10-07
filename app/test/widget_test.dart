@@ -53,10 +53,10 @@ void main() {
       ),
     );
 
-    expect(find.text('S1'), findsOneWidget);
-    expect(find.text('S5'), findsOneWidget);
-    expect(find.text('등받이 쪽'), findsOneWidget);
-    expect(find.text('방석 앞쪽'), findsOneWidget);
+    expect(find.text('L1 · S1'), findsOneWidget);
+    expect(find.text('C1 · S5'), findsOneWidget);
+    expect(find.text('앞 · 무릎 방향'), findsOneWidget);
+    expect(find.text('뒤 · 등받이 방향'), findsOneWidget);
   });
 
   testWidgets('demo screen shows and controls simulated pressure', (
@@ -65,15 +65,22 @@ void main() {
     await tester.pumpWidget(const MaterialApp(home: PressureDemoPage()));
 
     expect(find.text('먼저 방석을 비워주세요'), findsOneWidget);
-    await tester.ensureVisible(find.text('5초 영점 보정 시작'));
+    await tester.ensureVisible(find.text('1단계 · 5초 무부하 보정 시작'));
     await tester.pump();
-    await tester.tap(find.text('5초 영점 보정 시작'));
+    await tester.tap(find.text('1단계 · 5초 무부하 보정 시작'));
     await tester.pump();
     expect(find.text('영점값을 측정하고 있어요'), findsOneWidget);
     await tester.pump(const Duration(seconds: 5));
 
-    expect(find.text('S1'), findsOneWidget);
-    expect(find.text('S5'), findsOneWidget);
+    expect(find.text('방석에 정자세로 앉아주세요'), findsOneWidget);
+    await tester.ensureVisible(find.text('2단계 · 5초 정자세 보정 시작'));
+    await tester.tap(find.text('2단계 · 5초 정자세 보정 시작'));
+    await tester.pump();
+    expect(find.text('정자세 압력을 측정하고 있어요'), findsOneWidget);
+    await tester.pump(const Duration(seconds: 5));
+
+    expect(find.text('L1 · S1'), findsOneWidget);
+    expect(find.text('C1 · S5'), findsOneWidget);
     expect(find.text('48 × 72 압력 그리드'), findsOneWidget);
     expect(find.text('일시정지'), findsOneWidget);
 
@@ -94,9 +101,9 @@ void main() {
             height: 700,
             child: CalibrationPanel(
               status: CalibrationStatus.zeroRequired,
-              firstSetup: false,
               onStartZero: () => started = true,
               onStartBalance: () {},
+              onContinueWarning: () {},
             ),
           ),
         ),
@@ -104,8 +111,8 @@ void main() {
     );
 
     expect(find.text('먼저 방석을 비워주세요'), findsOneWidget);
-    expect(find.text('5초 영점 보정 시작'), findsOneWidget);
-    await tester.tap(find.text('5초 영점 보정 시작'));
+    expect(find.text('1단계 · 5초 무부하 보정 시작'), findsOneWidget);
+    await tester.tap(find.text('1단계 · 5초 무부하 보정 시작'));
     expect(started, isTrue);
   });
 
@@ -121,19 +128,49 @@ void main() {
             height: 700,
             child: CalibrationPanel(
               status: CalibrationStatus.balanceRequired,
-              firstSetup: true,
               onStartZero: () {},
               onStartBalance: () => started = true,
+              onContinueWarning: () {},
             ),
           ),
         ),
       ),
     );
 
-    expect(find.text('최초 설정 · 2 / 2'), findsOneWidget);
-    expect(find.text('센서 균형을 맞춰주세요'), findsOneWidget);
-    expect(find.text('5초 센서 균형 보정 시작'), findsOneWidget);
-    await tester.tap(find.text('5초 센서 균형 보정 시작'));
+    expect(find.text('캘리브레이션 · 2 / 2'), findsOneWidget);
+    expect(find.text('방석에 정자세로 앉아주세요'), findsOneWidget);
+    expect(find.text('2단계 · 5초 정자세 보정 시작'), findsOneWidget);
+    await tester.tap(find.text('2단계 · 5초 정자세 보정 시작'));
     expect(started, isTrue);
   });
+
+  testWidgets(
+    'allows continuing when seated calibration has unloaded sensors',
+    (tester) async {
+      var continued = false;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 400,
+              height: 800,
+              child: CalibrationPanel(
+                status: CalibrationStatus.balanceWarning,
+                warningSensors: const [3],
+                onStartZero: () {},
+                onStartBalance: () {},
+                onContinueWarning: () => continued = true,
+              ),
+            ),
+          ),
+        ),
+      );
+
+      expect(find.textContaining('무부하 센서가 있어도 그냥 계속하시겠습니까?'), findsOneWidget);
+      expect(find.text('고장 의심 센서: L2 · S3 · 왼쪽 뒤'), findsOneWidget);
+      await tester.ensureVisible(find.text('그래도 계속 진행'));
+      await tester.tap(find.text('그래도 계속 진행'));
+      expect(continued, isTrue);
+    },
+  );
 }

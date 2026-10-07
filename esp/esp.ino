@@ -41,6 +41,8 @@ bool balanceCalibrated = false;
 volatile bool zeroCalibrationRequested = false;
 volatile bool balanceCalibrationRequested = false;
 volatile bool calibrationStatusRequested = false;
+volatile bool continueZeroCalibrationRequested = false;
+volatile bool continueBalanceCalibrationRequested = false;
 unsigned long lastSampleTime = 0;
 unsigned long lastSerialPrintTime = 0;
 String deviceCode;
@@ -70,6 +72,10 @@ class RxCallbacks : public BLECharacteristicCallbacks {
         zeroCalibrationRequested = true;
       } else if (value.equalsIgnoreCase("CALIBRATE_BALANCE")) {
         balanceCalibrationRequested = true;
+      } else if (value.equalsIgnoreCase("CONTINUE_ZERO_CALIBRATION")) {
+        continueZeroCalibrationRequested = true;
+      } else if (value.equalsIgnoreCase("CONTINUE_BALANCE_CALIBRATION")) {
+        continueBalanceCalibrationRequested = true;
       } else if (value.equalsIgnoreCase("GET_CALIBRATION_STATUS")) {
         calibrationStatusRequested = true;
       }
@@ -77,9 +83,9 @@ class RxCallbacks : public BLECharacteristicCallbacks {
   }
 };
 
-void sendStatus(const char* status) {
+void sendStatus(const String& status) {
   if (!deviceConnected || txCharacteristic == nullptr) return;
-  txCharacteristic->setValue(status);
+  txCharacteristic->setValue(status.c_str());
   txCharacteristic->notify();
 }
 
@@ -163,7 +169,7 @@ void calibrateZero() {
     delay(10);
   }
 
-  bool zeroValid = true;
+  String warningSensors;
   for (int i = 0; i < SENSOR_COUNT; i++) {
     baselines[i] = sums[i] / (float)sampleCount;
     kalmanEstimates[i] = baselines[i];
@@ -174,7 +180,8 @@ void calibrateZero() {
     Serial.printf("센서 %d 무부하 기준값: %.1f mV\n", i + 1, baselines[i]);
     if (baselines[i] < MIN_UNLOADED_MV) {
       Serial.printf("센서 %d 무부하 전압 확인 필요\n", i + 1);
-      zeroValid = false;
+      if (warningSensors.length() > 0) warningSensors += ',';
+      warningSensors += String(i + 1);
     }
   }
   Serial.print("BASE_MV:");
@@ -183,18 +190,18 @@ void calibrateZero() {
     Serial.print(baselines[i], 1);
   }
   Serial.println();
-  if (!zeroValid) {
-    sendStatus("S:ZERO_FAILED");
+  if (warningSensors.length() > 0) {
+    sendStatus("S:ZERO_WARNING:" + warningSensors);
     return;
   }
 
-  sendStatus(balanceCalibrated ? "S:READY" : "S:BALANCE_REQUIRED");
+  sendStatus("S:BALANCE_REQUIRED");
   Serial.println("센서 영점 보정 완료");
 }
 
 void calibrateBalance() {
   sendStatus("S:BALANCE_CALIBRATING");
-  Serial.println("평평한 판과 균일한 기준 하중으로 센서 균형을 측정합니다.");
+  Serial.println("사용자가 방석에 정자세로 앉은 상태에서 센서 균형을 측정합니다.");
   float sums[SENSOR_COUNT] = {0};
   unsigned long sampleCount = 0;
   const unsigned long startedAt = millis();
@@ -209,19 +216,24 @@ void calibrateBalance() {
 
   float responses[SENSOR_COUNT];
   float sortedResponses[SENSOR_COUNT];
+  bool responseValid[SENSOR_COUNT];
+  int validCount = 0;
+  String warningSensors;
   for (int i = 0; i < SENSOR_COUNT; i++) {
     // 이 회로는 압력이 커질수록 탭 전압이 낮아집니다.
     responses[i] = baselines[i] - sums[i] / (float)sampleCount;
-    if (responses[i] < MIN_REFERENCE_DELTA) {
-      Serial.printf("센서 %d 기준 하중 부족: %.1f\n", i + 1, responses[i]);
-      sendStatus("S:CALIBRATION_FAILED");
-      return;
+    responseValid[i] = responses[i] >= MIN_REFERENCE_DELTA;
+    if (!responseValid[i]) {
+      Serial.printf("센서 %d 착석 반응 확인 필요: %.1f\n", i + 1, responses[i]);
+      if (warningSensors.length() > 0) warningSensors += ',';
+      warningSensors += String(i + 1);
+      continue;
     }
-    sortedResponses[i] = responses[i];
+    sortedResponses[validCount++] = responses[i];
   }
 
-  for (int i = 0; i < SENSOR_COUNT - 1; i++) {
-    for (int j = i + 1; j < SENSOR_COUNT; j++) {
+  for (int i = 0; i < validCount - 1; i++) {
+    for (int j = i + 1; j < validCount; j++) {
       if (sortedResponses[i] > sortedResponses[j]) {
         const float temp = sortedResponses[i];
         sortedResponses[i] = sortedResponses[j];
@@ -229,19 +241,26 @@ void calibrateBalance() {
       }
     }
   }
-  const float target = SENSOR_COUNT % 2 == 0
-      ? (sortedResponses[SENSOR_COUNT / 2 - 1] +
-         sortedResponses[SENSOR_COUNT / 2]) / 2.0f
-      : sortedResponses[SENSOR_COUNT / 2];
+  const float target = validCount == 0
+      ? 1.0f
+      : validCount % 2 == 0
+      ? (sortedResponses[validCount / 2 - 1] +
+         sortedResponses[validCount / 2]) / 2.0f
+      : sortedResponses[validCount / 2];
 
   for (int i = 0; i < SENSOR_COUNT; i++) {
-    sensorGains[i] = constrain(target / responses[i],
-                               MIN_SENSOR_GAIN, MAX_SENSOR_GAIN);
+    sensorGains[i] = responseValid[i]
+        ? constrain(target / responses[i], MIN_SENSOR_GAIN, MAX_SENSOR_GAIN)
+        : 1.0f;
     Serial.printf("센서 %d 보정계수: %.3f\n", i + 1, sensorGains[i]);
   }
   saveBalanceCalibration();
+  if (warningSensors.length() > 0) {
+    sendStatus("S:BALANCE_WARNING:" + warningSensors);
+    return;
+  }
   sendStatus("S:READY");
-  Serial.println("최초 센서 균형 보정 완료 및 저장");
+  Serial.println("정자세 센서 균형 보정 완료 및 저장");
 }
 
 void setupBle() {
@@ -295,7 +314,15 @@ void setup() {
 void loop() {
   if (calibrationStatusRequested) {
     calibrationStatusRequested = false;
-    sendStatus(balanceCalibrated ? "S:ZERO_REQUIRED" : "S:SETUP_REQUIRED");
+    sendStatus("S:SETUP_REQUIRED");
+  }
+  if (continueZeroCalibrationRequested) {
+    continueZeroCalibrationRequested = false;
+    sendStatus("S:BALANCE_REQUIRED");
+  }
+  if (continueBalanceCalibrationRequested) {
+    continueBalanceCalibrationRequested = false;
+    sendStatus("S:READY");
   }
   if (zeroCalibrationRequested) {
     zeroCalibrationRequested = false;

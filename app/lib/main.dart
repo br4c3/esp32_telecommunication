@@ -3,19 +3,32 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:permission_handler/permission_handler.dart';
 
-void main() => runApp(const Esp32App());
+import 'firebase_options.dart';
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  if (kIsWeb) {
+    await Firebase.initializeApp(options: DefaultFirebaseOptions.web);
+  }
+  runApp(const Esp32App());
+}
 
 enum CalibrationStatus {
   checking,
   zeroRequired,
   zeroCalibrating,
+  zeroWarning,
   balanceRequired,
   balanceCalibrating,
+  balanceWarning,
   ready,
 }
 
@@ -105,9 +118,159 @@ class Esp32App extends StatelessWidget {
           ),
         ),
       ),
-      home: BleTerminalPage(requestBluetoothOnLaunch: requestBluetoothOnLaunch),
+      home: kIsWeb
+          ? AuthGate(requestBluetoothOnLaunch: requestBluetoothOnLaunch)
+          : BleTerminalPage(requestBluetoothOnLaunch: requestBluetoothOnLaunch),
     );
   }
+}
+
+class AuthGate extends StatelessWidget {
+  const AuthGate({super.key, required this.requestBluetoothOnLaunch});
+
+  final bool requestBluetoothOnLaunch;
+
+  @override
+  Widget build(BuildContext context) => StreamBuilder<User?>(
+    stream: FirebaseAuth.instance.authStateChanges(),
+    builder: (context, snapshot) {
+      if (snapshot.connectionState == ConnectionState.waiting) {
+        return const Scaffold(body: Center(child: CircularProgressIndicator()));
+      }
+      if (snapshot.hasData) {
+        return BleTerminalPage(
+          requestBluetoothOnLaunch: requestBluetoothOnLaunch,
+        );
+      }
+      return const LoginPage();
+    },
+  );
+}
+
+class LoginPage extends StatefulWidget {
+  const LoginPage({super.key});
+
+  @override
+  State<LoginPage> createState() => _LoginPageState();
+}
+
+class _LoginPageState extends State<LoginPage> {
+  bool _submitting = false;
+  String? _message;
+
+  String _authMessage(Object error) {
+    if (error is! FirebaseAuthException) return '로그인 처리 중 오류가 발생했습니다.';
+    return switch (error.code) {
+      'popup-closed-by-user' || 'cancelled-popup-request' => '로그인이 취소되었습니다.',
+      'popup-blocked' => '브라우저에서 로그인 팝업을 허용해 주세요.',
+      'account-exists-with-different-credential' =>
+        '같은 이메일이 다른 로그인 방식으로 이미 가입되어 있습니다.',
+      'operation-not-allowed' => 'Firebase Console에서 해당 로그인 제공자를 활성화해 주세요.',
+      'too-many-requests' => '요청이 너무 많습니다. 잠시 후 다시 시도해 주세요.',
+      _ => error.message ?? '로그인 처리 중 오류가 발생했습니다.',
+    };
+  }
+
+  Future<void> _signIn(AuthProvider provider) async {
+    setState(() {
+      _submitting = true;
+      _message = null;
+    });
+    try {
+      await FirebaseAuth.instance.signInWithPopup(provider);
+    } catch (error) {
+      if (mounted) setState(() => _message = _authMessage(error));
+    } finally {
+      if (mounted) setState(() => _submitting = false);
+    }
+  }
+
+  Future<void> _signInWithGoogle() async {
+    final provider = GoogleAuthProvider()
+      ..addScope('email')
+      ..setCustomParameters({'prompt': 'select_account'});
+    await _signIn(provider);
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    body: SafeArea(
+      child: Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(24),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 420),
+            child: Card(
+              child: Padding(
+                padding: const EdgeInsets.all(28),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    const Icon(
+                      Icons.airline_seat_recline_normal_rounded,
+                      size: 52,
+                      color: AppColors.ink,
+                    ),
+                    const SizedBox(height: 16),
+                    Text(
+                      'SEAT CARE',
+                      textAlign: TextAlign.center,
+                      style: Theme.of(context).textTheme.headlineSmall
+                          ?.copyWith(fontWeight: FontWeight.w900),
+                    ),
+                    const SizedBox(height: 6),
+                    const Text(
+                      '계정으로 로그인하세요',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: Color(0xff6f7482)),
+                    ),
+                    const SizedBox(height: 26),
+                    SizedBox(
+                      height: 50,
+                      child: OutlinedButton.icon(
+                        onPressed: _submitting ? null : _signInWithGoogle,
+                        icon: const Text(
+                          'G',
+                          style: TextStyle(
+                            fontSize: 19,
+                            fontWeight: FontWeight.w900,
+                            color: Color(0xff4285f4),
+                          ),
+                        ),
+                        label: const Text('Google로 계속하기'),
+                      ),
+                    ),
+                    if (_submitting) ...[
+                      const SizedBox(height: 18),
+                      const Center(child: CircularProgressIndicator()),
+                    ],
+                    if (_message != null) ...[
+                      const SizedBox(height: 14),
+                      Text(
+                        _message!,
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          color: Color(0xff9f1c1c),
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 18),
+                    const Text(
+                      '로그인하면 서비스 이용약관 및 개인정보 처리방침에 동의한 것으로 간주됩니다.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(fontSize: 11, color: Color(0xff7a7f8d)),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
 }
 
 class BleTerminalPage extends StatefulWidget {
@@ -124,7 +287,6 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
   static final Guid _rxId = Guid('6E400002-B5A3-F393-E0A9-E50E24DCCA9E');
   static final Guid _txId = Guid('6E400003-B5A3-F393-E0A9-E50E24DCCA9E');
 
-  final _messageController = TextEditingController();
   final _devices = <DeviceIdentifier, ScanResult>{};
 
   StreamSubscription<List<ScanResult>>? _scanSubscription;
@@ -138,6 +300,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
   bool _isConnected = false;
   CalibrationStatus _calibrationStatus = CalibrationStatus.checking;
   bool _isFirstSetup = false;
+  List<int> _warningSensors = const [];
   String? _error;
   List<double> _pressures = List<double>.filled(5, 0);
 
@@ -183,6 +346,9 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
   }
 
   Future<bool> _requestPermissions() async {
+    // Web Bluetooth and camera permissions are requested by the browser from
+    // the user gesture that starts scanning.
+    if (kIsWeb) return true;
     if (Platform.isAndroid) {
       final statuses = await [
         Permission.bluetoothScan,
@@ -287,7 +453,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
         license: License.nonprofit,
         timeout: const Duration(seconds: 15),
       );
-      if (Platform.isAndroid) await device.requestMtu(64);
+      if (!kIsWeb && Platform.isAndroid) await device.requestMtu(64);
       _device = device;
       await _connectionSubscription?.cancel();
       _connectionSubscription = device.connectionState.listen((state) {
@@ -327,6 +493,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
           _calibrationTimeout?.cancel();
           setState(() {
             _isFirstSetup = true;
+            _warningSensors = const [];
             _calibrationStatus = CalibrationStatus.zeroRequired;
           });
           return;
@@ -359,19 +526,35 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
           );
           return;
         }
+        if (status.startsWith('S:ZERO_WARNING:')) {
+          _calibrationTimeout?.cancel();
+          setState(() {
+            _warningSensors = _parseWarningSensors(status);
+            _calibrationStatus = CalibrationStatus.zeroWarning;
+          });
+          return;
+        }
+        if (status.startsWith('S:BALANCE_WARNING:')) {
+          _calibrationTimeout?.cancel();
+          setState(() {
+            _warningSensors = _parseWarningSensors(status);
+            _calibrationStatus = CalibrationStatus.balanceWarning;
+          });
+          return;
+        }
         if (status == 'S:CALIBRATION_FAILED') {
           _calibrationTimeout?.cancel();
           setState(() {
-            _calibrationStatus = CalibrationStatus.balanceRequired;
-            _error = '기준 하중이 모든 센서에 전달되지 않았습니다. 판과 하중을 다시 확인해 주세요.';
+            _warningSensors = const [];
+            _calibrationStatus = CalibrationStatus.balanceWarning;
           });
           return;
         }
         if (status == 'S:ZERO_FAILED') {
           _calibrationTimeout?.cancel();
           setState(() {
-            _calibrationStatus = CalibrationStatus.zeroRequired;
-            _error = '무부하 전압이 낮은 센서가 있습니다. 센서 배선과 방석 위의 물체를 확인해 주세요.';
+            _warningSensors = const [];
+            _calibrationStatus = CalibrationStatus.zeroWarning;
           });
           return;
         }
@@ -408,6 +591,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
       _isConnected = false;
       _calibrationStatus = CalibrationStatus.checking;
       _isFirstSetup = false;
+      _warningSensors = const [];
       _pressures = List<double>.filled(5, 0);
     });
   }
@@ -487,16 +671,37 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
     }
   }
 
-  Future<void> _send() async {
-    final text = _messageController.text.trim();
+  List<int> _parseWarningSensors(String status) {
+    final separator = status.lastIndexOf(':');
+    if (separator < 0 || separator == status.length - 1) return const [];
+    return status
+        .substring(separator + 1)
+        .split(',')
+        .map(int.tryParse)
+        .whereType<int>()
+        .toList(growable: false);
+  }
+
+  Future<void> _continueAfterCalibrationWarning() async {
     final rx = _rxCharacteristic;
-    if (text.isEmpty || rx == null) return;
+    if (rx == null) return;
+    final warningStatus = _calibrationStatus;
+    final command = warningStatus == CalibrationStatus.zeroWarning
+        ? 'CONTINUE_ZERO_CALIBRATION'
+        : 'CONTINUE_BALANCE_CALIBRATION';
+    setState(() {
+      _warningSensors = const [];
+      if (warningStatus == CalibrationStatus.zeroWarning) {
+        _isFirstSetup = true;
+        _calibrationStatus = CalibrationStatus.balanceRequired;
+      } else {
+        _calibrationStatus = CalibrationStatus.ready;
+      }
+    });
     try {
-      await rx.write(utf8.encode(text), withoutResponse: false);
-      if (!mounted) return;
-      _messageController.clear();
+      await rx.write(utf8.encode(command), withoutResponse: false);
     } catch (error) {
-      _showError('Send failed: $error');
+      _showError('보정 계속 진행 실패: $error');
     }
   }
 
@@ -510,7 +715,6 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
     _connectionSubscription?.cancel();
     _notificationSubscription?.cancel();
     _calibrationTimeout?.cancel();
-    _messageController.dispose();
     _device?.disconnect();
     super.dispose();
   }
@@ -554,6 +758,12 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
               onPressed: _disconnect,
               tooltip: '연결 해제',
               icon: const Icon(Icons.link_off_rounded),
+            ),
+          if (kIsWeb)
+            IconButton(
+              onPressed: () => FirebaseAuth.instance.signOut(),
+              tooltip: '로그아웃',
+              icon: const Icon(Icons.logout_rounded),
             ),
           const SizedBox(width: 12),
         ],
@@ -689,9 +899,10 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
                 Expanded(
                   child: CalibrationPanel(
                     status: _calibrationStatus,
-                    firstSetup: _isFirstSetup,
+                    warningSensors: _warningSensors,
                     onStartZero: _startZeroCalibration,
                     onStartBalance: _startBalanceCalibration,
+                    onContinueWarning: _continueAfterCalibrationWarning,
                   ),
                 ),
               ] else ...[
@@ -717,8 +928,6 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
                 ),
                 const SizedBox(height: 8),
                 Expanded(child: PressureGrid(values: _pressures)),
-                const SizedBox(height: 10),
-                _MessageComposer(controller: _messageController, onSend: _send),
               ],
             ],
           ),
@@ -732,22 +941,28 @@ class CalibrationPanel extends StatelessWidget {
   const CalibrationPanel({
     super.key,
     required this.status,
-    required this.firstSetup,
+    this.warningSensors = const [],
     required this.onStartZero,
     required this.onStartBalance,
+    required this.onContinueWarning,
   });
 
   final CalibrationStatus status;
-  final bool firstSetup;
+  final List<int> warningSensors;
   final VoidCallback onStartZero;
   final VoidCallback onStartBalance;
+  final VoidCallback onContinueWarning;
 
   @override
   Widget build(BuildContext context) {
     final checking = status == CalibrationStatus.checking;
     final balance =
         status == CalibrationStatus.balanceRequired ||
-        status == CalibrationStatus.balanceCalibrating;
+        status == CalibrationStatus.balanceCalibrating ||
+        status == CalibrationStatus.balanceWarning;
+    final warning =
+        status == CalibrationStatus.zeroWarning ||
+        status == CalibrationStatus.balanceWarning;
     final calibrating =
         status == CalibrationStatus.zeroCalibrating ||
         status == CalibrationStatus.balanceCalibrating;
@@ -755,153 +970,279 @@ class CalibrationPanel extends StatelessWidget {
         ? '보정 정보를 확인하고 있어요'
         : balance
         ? calibrating
-              ? '센서별 반응을 측정하고 있어요'
-              : '센서 균형을 맞춰주세요'
+              ? '정자세 압력을 측정하고 있어요'
+              : warning
+              ? '센서 상태를 확인해 주세요'
+              : '방석에 정자세로 앉아주세요'
         : calibrating
         ? '영점값을 측정하고 있어요'
+        : warning
+        ? '센서 상태를 확인해 주세요'
         : '먼저 방석을 비워주세요';
     final description = checking
         ? 'ESP32에 저장된 최초 보정 정보를 불러옵니다.'
         : balance
         ? calibrating
-              ? '측정이 끝날 때까지 판과 기준 하중을 움직이지 마세요.'
-              : '이 단계는 처음 사용할 때 한 번만 진행합니다.'
+              ? '측정이 끝날 때까지 편안한 정자세를 유지하세요.'
+              : warning
+              ? '일부 센서 반응이 기준 범위를 벗어났습니다.'
+              : '평소 바르게 앉았다고 생각하는 자세를 기준으로 저장합니다.'
         : calibrating
         ? '측정이 끝날 때까지 방석을 누르지 마세요.'
+        : warning
+        ? '일부 센서의 무부하 값이 기준 범위를 벗어났습니다.'
         : '사람이나 물건이 없는 상태를 0점으로 설정합니다.';
-    final stepLabel = firstSetup
-        ? balance
-              ? '최초 설정 · 2 / 2'
-              : '최초 설정 · 1 / 2'
-        : '영점 설정 · 1 / 1';
-    return SingleChildScrollView(
-      child: Center(
+    final stepLabel = balance ? '캘리브레이션 · 2 / 2' : '캘리브레이션 · 1 / 2';
+    return LayoutBuilder(
+      builder: (context, constraints) => SingleChildScrollView(
         child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 520),
-          child: Column(
-            children: [
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 10,
-                  vertical: 5,
-                ),
-                decoration: BoxDecoration(
-                  color: AppColors.corporateYellow,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-                child: Text(
-                  stepLabel,
-                  style: const TextStyle(
-                    color: AppColors.ink,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w800,
+          constraints: BoxConstraints(minHeight: constraints.maxHeight),
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 520),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 5,
+                    ),
+                    decoration: BoxDecoration(
+                      color: AppColors.corporateYellow,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                    child: Text(
+                      stepLabel,
+                      style: const TextStyle(
+                        color: AppColors.ink,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
                   ),
-                ),
-              ),
-              const SizedBox(height: 12),
-              Text(
-                title,
-                textAlign: TextAlign.center,
-                style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                  fontWeight: FontWeight.w900,
-                ),
-              ),
-              const SizedBox(height: 6),
-              Text(
-                description,
-                textAlign: TextAlign.center,
-                style: const TextStyle(color: Color(0xff747987)),
-              ),
-              const SizedBox(height: 8),
-              SizedBox(
-                height: 290,
-                child: PressureGrid(values: List<double>.filled(5, 0)),
-              ),
-              if (checking)
-                const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 24),
-                  child: CircularProgressIndicator(),
-                )
-              else if (calibrating)
-                TweenAnimationBuilder<double>(
-                  tween: Tween(begin: 0, end: 1),
-                  duration: const Duration(seconds: 5),
-                  builder: (context, progress, _) => Column(
-                    children: [
-                      LinearProgressIndicator(value: progress, minHeight: 7),
-                      const SizedBox(height: 9),
-                      Text(
-                        '${math.max(0, 5 - (progress * 5).floor())}초 남음',
-                        style: const TextStyle(
-                          fontWeight: FontWeight.w800,
-                          color: Color(0xff6b5100),
+                  const SizedBox(height: 12),
+                  Text(
+                    title,
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    description,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: Color(0xff747987)),
+                  ),
+                  const SizedBox(height: 8),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(12),
+                    child: Image.asset(
+                      'assets/images/cushion.png',
+                      height: 230,
+                      width: double.infinity,
+                      fit: BoxFit.contain,
+                    ),
+                  ),
+                  if (checking)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 24),
+                      child: CircularProgressIndicator(),
+                    )
+                  else if (calibrating)
+                    TweenAnimationBuilder<double>(
+                      tween: Tween(begin: 0, end: 1),
+                      duration: const Duration(seconds: 5),
+                      builder: (context, progress, _) => Column(
+                        children: [
+                          LinearProgressIndicator(
+                            value: progress,
+                            minHeight: 7,
+                          ),
+                          const SizedBox(height: 9),
+                          Text(
+                            '${math.max(0, 5 - (progress * 5).floor())}초 남음',
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w800,
+                              color: Color(0xff6b5100),
+                            ),
+                          ),
+                        ],
+                      ),
+                    )
+                  else if (warning)
+                    _CalibrationWarning(
+                      sensors: warningSensors,
+                      isZeroWarning: status == CalibrationStatus.zeroWarning,
+                      onRetry: balance ? onStartBalance : onStartZero,
+                      onContinue: onContinueWarning,
+                    )
+                  else if (balance)
+                    const Column(
+                      children: [
+                        _CalibrationTip(
+                          icon: Icons.airline_seat_recline_normal_rounded,
+                          text: '방석 중앙에 앉아 허리와 골반을 바르게 세우세요.',
+                        ),
+                        SizedBox(height: 8),
+                        _CalibrationTip(
+                          icon: Icons.timer_outlined,
+                          text: '평소의 정자세를 잡고 시작 후 5초 동안 유지하세요.',
+                        ),
+                      ],
+                    )
+                  else
+                    const Column(
+                      children: [
+                        _CalibrationTip(
+                          icon: Icons.event_seat_outlined,
+                          text: '방석에서 일어나 압력을 완전히 제거하세요.',
+                        ),
+                        SizedBox(height: 8),
+                        _CalibrationTip(
+                          icon: Icons.timer_outlined,
+                          text: '시작 후 5초 동안 방석을 그대로 두세요.',
+                        ),
+                      ],
+                    ),
+                  const SizedBox(height: 16),
+                  if (!checking && !warning)
+                    SizedBox(
+                      width: double.infinity,
+                      height: 52,
+                      child: FilledButton.icon(
+                        onPressed: calibrating
+                            ? null
+                            : balance
+                            ? onStartBalance
+                            : onStartZero,
+                        icon: calibrating
+                            ? const SizedBox.square(
+                                dimension: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : Icon(
+                                balance
+                                    ? Icons.airline_seat_recline_normal_rounded
+                                    : Icons.tune_rounded,
+                              ),
+                        label: Text(
+                          calibrating
+                              ? '보정 진행 중'
+                              : balance
+                              ? '2단계 · 5초 정자세 보정 시작'
+                              : '1단계 · 5초 무부하 보정 시작',
+                          style: const TextStyle(fontWeight: FontWeight.w800),
                         ),
                       ),
-                    ],
-                  ),
-                )
-              else if (balance)
-                const Column(
-                  children: [
-                    _CalibrationTip(
-                      icon: Icons.crop_landscape_rounded,
-                      text: '방석 전체를 덮는 단단하고 평평한 판을 올리세요.',
                     ),
-                    SizedBox(height: 8),
-                    _CalibrationTip(
-                      icon: Icons.fitness_center_rounded,
-                      text: '판 중앙에 기준 하중을 올리고 5초 동안 고정하세요.',
-                    ),
-                  ],
-                )
-              else
-                const Column(
-                  children: [
-                    _CalibrationTip(
-                      icon: Icons.event_seat_outlined,
-                      text: '방석에서 일어나 압력을 완전히 제거하세요.',
-                    ),
-                    SizedBox(height: 8),
-                    _CalibrationTip(
-                      icon: Icons.timer_outlined,
-                      text: '시작 후 5초 동안 방석을 그대로 두세요.',
-                    ),
-                  ],
-                ),
-              const SizedBox(height: 16),
-              if (!checking)
-                SizedBox(
-                  width: double.infinity,
-                  height: 52,
-                  child: FilledButton.icon(
-                    onPressed: calibrating
-                        ? null
-                        : balance
-                        ? onStartBalance
-                        : onStartZero,
-                    icon: calibrating
-                        ? const SizedBox.square(
-                            dimension: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : Icon(
-                            balance
-                                ? Icons.balance_rounded
-                                : Icons.tune_rounded,
-                          ),
-                    label: Text(
-                      calibrating
-                          ? '보정 진행 중'
-                          : balance
-                          ? '5초 센서 균형 보정 시작'
-                          : '5초 영점 보정 시작',
-                      style: const TextStyle(fontWeight: FontWeight.w800),
-                    ),
-                  ),
-                ),
-            ],
+                ],
+              ),
+            ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _CalibrationWarning extends StatelessWidget {
+  const _CalibrationWarning({
+    required this.sensors,
+    required this.isZeroWarning,
+    required this.onRetry,
+    required this.onContinue,
+  });
+
+  final List<int> sensors;
+  final bool isZeroWarning;
+  final VoidCallback onRetry;
+  final VoidCallback onContinue;
+
+  @override
+  Widget build(BuildContext context) {
+    final suspectedSensors = sensors
+        .where(
+          (sensor) =>
+              sensor >= 1 && sensor <= PressureField.sensorLabels.length,
+        )
+        .map((sensor) {
+          final index = sensor - 1;
+          return '${PressureField.sensorLabels[index]} · S$sensor · ${PressureField.sensorLocationNames[index]}';
+        })
+        .toList(growable: false);
+    final sensorLabel = suspectedSensors.isEmpty
+        ? '일부 센서'
+        : suspectedSensors.join(', ');
+    final message = isZeroWarning
+        ? '영점값이 정상 범위를 벗어났습니다. 무부하 센서가 있어도 그냥 계속하시겠습니까?'
+        : '하중이 감지되지 않았습니다. 무부하 센서가 있어도 그냥 계속하시겠습니까?';
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xfffff3cd),
+        border: Border.all(color: const Color(0xffd39e00)),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        children: [
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            decoration: BoxDecoration(
+              color: const Color(0xffffdddd),
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: Text(
+              '고장 의심 센서: $sensorLabel',
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: Color(0xff9f1c1c),
+                fontSize: 14,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              const Icon(Icons.warning_amber_rounded, color: Color(0xff8a6500)),
+              const SizedBox(width: 9),
+              Expanded(
+                child: Text(
+                  '$message 계속 진행하면 위 센서는 기본 보정값으로 사용됩니다.',
+                  style: const TextStyle(
+                    color: Color(0xff644c00),
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: onRetry,
+                  child: const Text('다시 측정'),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: FilledButton(
+                  onPressed: onContinue,
+                  child: const Text('그래도 계속 진행'),
+                ),
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }
@@ -954,12 +1295,25 @@ class _PressureDemoPageState extends State<PressureDemoPage> {
   List<double> _values = List<double>.of(_initialValues);
 
   void _startDemoCalibration() {
-    setState(() => _demoCalibrationStatus = CalibrationStatus.zeroCalibrating);
+    final balance =
+        _demoCalibrationStatus == CalibrationStatus.balanceRequired ||
+        _demoCalibrationStatus == CalibrationStatus.balanceWarning;
+    setState(
+      () => _demoCalibrationStatus = balance
+          ? CalibrationStatus.balanceCalibrating
+          : CalibrationStatus.zeroCalibrating,
+    );
     _demoCalibrationTimer?.cancel();
     _demoCalibrationTimer = Timer(const Duration(seconds: 5), () {
       if (!mounted) return;
-      setState(() => _demoCalibrationStatus = CalibrationStatus.ready);
-      _startAnimation();
+      if (balance) {
+        setState(() => _demoCalibrationStatus = CalibrationStatus.ready);
+        _startAnimation();
+      } else {
+        setState(
+          () => _demoCalibrationStatus = CalibrationStatus.balanceRequired,
+        );
+      }
     });
   }
 
@@ -1019,9 +1373,9 @@ class _PressureDemoPageState extends State<PressureDemoPage> {
             padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
             child: CalibrationPanel(
               status: _demoCalibrationStatus,
-              firstSetup: false,
               onStartZero: _startDemoCalibration,
               onStartBalance: _startDemoCalibration,
+              onContinueWarning: () {},
             ),
           ),
         ),
@@ -1275,12 +1629,23 @@ class PressureFrame {
 class PressureField {
   const PressureField._();
 
+  static const sensorLabels = <String>['L1', 'R1', 'L2', 'R2', 'C1'];
+  static const sensorLocationNames = <String>[
+    '왼쪽 앞',
+    '오른쪽 앞',
+    '왼쪽 뒤',
+    '오른쪽 뒤',
+    '중앙 후방',
+  ];
+
+  // 배치 도면의 40 x 40 좌표를 0~1 범위로 정규화했습니다.
+  // 화면 위쪽은 앞무릎 방향, 아래쪽은 뒤 등받이 방향입니다.
   static const sensorPositions = <Offset>[
-    Offset(.28, .18),
-    Offset(.72, .18),
-    Offset(.50, .50),
-    Offset(.22, .82),
-    Offset(.78, .82),
+    Offset(.300, .300), // L1 (12, 12)
+    Offset(.700, .300), // R1 (28, 12)
+    Offset(.325, .675), // L2 (13, 27)
+    Offset(.675, .675), // R2 (27, 27)
+    Offset(.500, .850), // C1 (20, 34)
   ];
   static const double _sigma = .34;
   static const double _regularization = .002;
@@ -1446,7 +1811,7 @@ class PressureGrid extends StatelessWidget {
                   left: 0,
                   right: 0,
                   child: Text(
-                    '등받이 쪽',
+                    '앞 · 무릎 방향',
                     textAlign: TextAlign.center,
                     style: TextStyle(
                       color: Color(0xff7c8290),
@@ -1460,7 +1825,7 @@ class PressureGrid extends StatelessWidget {
                   left: 0,
                   right: 0,
                   child: Text(
-                    '방석 앞쪽',
+                    '뒤 · 등받이 방향',
                     textAlign: TextAlign.center,
                     style: TextStyle(
                       color: Color(0xff7c8290),
@@ -1483,6 +1848,7 @@ class PressureGrid extends StatelessWidget {
                     child: _PressureSensorMarker(
                       key: ValueKey('pressure-sensor-${index + 1}'),
                       sensorNumber: index + 1,
+                      sensorLabel: PressureField.sensorLabels[index],
                       value: sensorValues[index],
                       maximum: displayMaximum,
                     ),
@@ -1604,11 +1970,13 @@ class _PressureSensorMarker extends StatelessWidget {
   const _PressureSensorMarker({
     super.key,
     required this.sensorNumber,
+    required this.sensorLabel,
     required this.value,
     required this.maximum,
   });
 
   final int sensorNumber;
+  final String sensorLabel;
   final double value;
   final double maximum;
 
@@ -1633,7 +2001,7 @@ class _PressureSensorMarker extends StatelessWidget {
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             Text(
-              'S$sensorNumber',
+              '$sensorLabel · S$sensorNumber',
               style: const TextStyle(
                 color: Color(0xff4e5050),
                 fontSize: 9,
@@ -1961,44 +2329,6 @@ class _SummaryDivider extends StatelessWidget {
     width: 1,
     height: 34,
     color: Colors.white.withValues(alpha: .18),
-  );
-}
-
-class _MessageComposer extends StatelessWidget {
-  const _MessageComposer({required this.controller, required this.onSend});
-
-  final TextEditingController controller;
-  final VoidCallback onSend;
-
-  @override
-  Widget build(BuildContext context) => Container(
-    padding: const EdgeInsets.all(8),
-    decoration: BoxDecoration(
-      color: Colors.white,
-      borderRadius: BorderRadius.circular(2),
-    ),
-    child: Row(
-      children: [
-        Expanded(
-          child: TextField(
-            controller: controller,
-            textInputAction: TextInputAction.send,
-            onSubmitted: (_) => onSend(),
-            decoration: const InputDecoration(
-              hintText: 'ESP32에 명령 보내기',
-              prefixIcon: Icon(Icons.terminal_rounded),
-              isDense: true,
-            ),
-          ),
-        ),
-        const SizedBox(width: 8),
-        IconButton.filled(
-          onPressed: onSend,
-          tooltip: '전송',
-          icon: const Icon(Icons.arrow_upward_rounded),
-        ),
-      ],
-    ),
   );
 }
 
