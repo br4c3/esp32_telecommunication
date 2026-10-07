@@ -6,6 +6,8 @@
 	<string>This app uses Bluetooth to exchange messages with your ESP32.</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
 	<string>This app uses Bluetooth to exchange messages with your ESP32.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>기기 코드 바코드를 스캔하여 해당 ESP32에 연결합니다.</string>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
 	<key>CFBundleDevelopmentRegion</key>

@@ -30,7 +30,10 @@ BLEServer* bleServer = nullptr;
 BLECharacteristic* txCharacteristic = nullptr;
 bool deviceConnected = false;
 bool previousConnection = false;
+volatile bool calibrationRequested = false;
 unsigned long lastSampleTime = 0;
+String deviceCode;
+String deviceName;
 
 class ServerCallbacks : public BLEServerCallbacks {
   void onConnect(BLEServer* server) override {
@@ -47,12 +50,22 @@ class ServerCallbacks : public BLEServerCallbacks {
 class RxCallbacks : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* characteristic) override {
     String value = characteristic->getValue();
+    value.trim();
     if (value.length() > 0) {
       Serial.print("BLE 수신: ");
       Serial.println(value);
+      if (value.equalsIgnoreCase("CALIBRATE")) {
+        calibrationRequested = true;
+      }
     }
   }
 };
+
+void sendStatus(const char* status) {
+  if (!deviceConnected || txCharacteristic == nullptr) return;
+  txCharacteristic->setValue(status);
+  txCharacteristic->notify();
+}
 
 float medianFilter(int sensor, int newValue) {
   medianBuffers[sensor][medianIndexes[sensor]] = newValue;
@@ -84,6 +97,7 @@ float kalmanFilter(int sensor, float measurement) {
 }
 
 void calibrateSensors() {
+  sendStatus("S:CALIBRATING");
   Serial.println("5초 동안 센서에 압력을 가하지 마세요.");
   unsigned long sums[SENSOR_COUNT] = {0};
   unsigned long sampleCount = 0;
@@ -113,10 +127,18 @@ void calibrateSensors() {
     digitalWrite(LED_PIN, LOW);
     delay(200);
   }
+  sendStatus("S:READY");
+  Serial.println("센서 캘리브레이션 완료");
 }
 
 void setupBle() {
-  BLEDevice::init("ESP32-Pressure-6");
+  const uint64_t chipId = ESP.getEfuseMac();
+  char codeBuffer[7];
+  snprintf(codeBuffer, sizeof(codeBuffer), "%06X", (uint32_t)(chipId & 0xFFFFFF));
+  deviceCode = String(codeBuffer);
+  deviceName = "ESP32-P-" + deviceCode;
+
+  BLEDevice::init(deviceName.c_str());
   BLEDevice::setMTU(64);
   bleServer = BLEDevice::createServer();
   bleServer->setCallbacks(new ServerCallbacks());
@@ -140,7 +162,8 @@ void setupBle() {
   advertising->setMinPreferred(0x06);
   advertising->setMaxPreferred(0x12);
   BLEDevice::startAdvertising();
-  Serial.println("BLE 광고 시작 완료: ESP32-Pressure-6");
+  Serial.println("BLE 광고 시작 완료: " + deviceName);
+  Serial.println("기기 바코드 값: ESP32:" + deviceCode);
 }
 
 void setup() {
@@ -158,6 +181,13 @@ void setup() {
 }
 
 void loop() {
+  if (calibrationRequested) {
+    calibrationRequested = false;
+    calibrateSensors();
+    lastSampleTime = millis();
+    return;
+  }
+
   if (!deviceConnected && previousConnection) {
     delay(500);
     bleServer->startAdvertising();
