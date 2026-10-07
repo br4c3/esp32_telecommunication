@@ -10,7 +10,14 @@ import 'package:permission_handler/permission_handler.dart';
 
 void main() => runApp(const Esp32App());
 
-enum CalibrationStatus { required, calibrating, ready }
+enum CalibrationStatus {
+  checking,
+  zeroRequired,
+  zeroCalibrating,
+  balanceRequired,
+  balanceCalibrating,
+  ready,
+}
 
 abstract final class AppColors {
   static const corporateYellow = Color(0xffffc928);
@@ -129,9 +136,10 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
   bool _isScanning = false;
   bool _isConnecting = false;
   bool _isConnected = false;
-  CalibrationStatus _calibrationStatus = CalibrationStatus.required;
+  CalibrationStatus _calibrationStatus = CalibrationStatus.checking;
+  bool _isFirstSetup = false;
   String? _error;
-  List<double> _pressures = List<double>.filled(6, 0);
+  List<double> _pressures = List<double>.filled(5, 0);
 
   @override
   void initState() {
@@ -287,7 +295,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
         setState(() {
           _isConnected = state == BluetoothConnectionState.connected;
           if (!_isConnected) {
-            _calibrationStatus = CalibrationStatus.required;
+            _calibrationStatus = CalibrationStatus.checking;
           }
         });
         if (state == BluetoothConnectionState.disconnected) {
@@ -314,11 +322,60 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
       _notificationSubscription = tx.onValueReceived.listen((bytes) {
         if (!mounted) return;
         final text = utf8.decode(bytes, allowMalformed: true);
-        if (text.trim() == 'S:CALIBRATING') {
-          setState(() => _calibrationStatus = CalibrationStatus.calibrating);
+        final status = text.trim();
+        if (status == 'S:SETUP_REQUIRED') {
+          _calibrationTimeout?.cancel();
+          setState(() {
+            _isFirstSetup = true;
+            _calibrationStatus = CalibrationStatus.zeroRequired;
+          });
           return;
         }
-        if (text.trim() == 'S:READY') {
+        if (status == 'S:ZERO_REQUIRED') {
+          _calibrationTimeout?.cancel();
+          setState(() {
+            _isFirstSetup = false;
+            _calibrationStatus = CalibrationStatus.zeroRequired;
+          });
+          return;
+        }
+        if (status == 'S:CALIBRATING' || status == 'S:ZERO_CALIBRATING') {
+          setState(
+            () => _calibrationStatus = CalibrationStatus.zeroCalibrating,
+          );
+          return;
+        }
+        if (status == 'S:BALANCE_REQUIRED') {
+          _calibrationTimeout?.cancel();
+          setState(() {
+            _isFirstSetup = true;
+            _calibrationStatus = CalibrationStatus.balanceRequired;
+          });
+          return;
+        }
+        if (status == 'S:BALANCE_CALIBRATING') {
+          setState(
+            () => _calibrationStatus = CalibrationStatus.balanceCalibrating,
+          );
+          return;
+        }
+        if (status == 'S:CALIBRATION_FAILED') {
+          _calibrationTimeout?.cancel();
+          setState(() {
+            _calibrationStatus = CalibrationStatus.balanceRequired;
+            _error = '기준 하중이 모든 센서에 전달되지 않았습니다. 판과 하중을 다시 확인해 주세요.';
+          });
+          return;
+        }
+        if (status == 'S:ZERO_FAILED') {
+          _calibrationTimeout?.cancel();
+          setState(() {
+            _calibrationStatus = CalibrationStatus.zeroRequired;
+            _error = '무부하 전압이 낮은 센서가 있습니다. 센서 배선과 방석 위의 물체를 확인해 주세요.';
+          });
+          return;
+        }
+        if (status == 'S:READY') {
           _calibrationTimeout?.cancel();
           setState(() => _calibrationStatus = CalibrationStatus.ready);
           return;
@@ -330,9 +387,10 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
       if (mounted) {
         setState(() {
           _isConnected = true;
-          _calibrationStatus = CalibrationStatus.required;
+          _calibrationStatus = CalibrationStatus.checking;
         });
       }
+      await _requestCalibrationStatus();
     } catch (error) {
       await device.disconnect();
       _showError('Connection failed: $error');
@@ -348,34 +406,84 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
       _device = null;
       _rxCharacteristic = null;
       _isConnected = false;
-      _calibrationStatus = CalibrationStatus.required;
-      _pressures = List<double>.filled(6, 0);
+      _calibrationStatus = CalibrationStatus.checking;
+      _isFirstSetup = false;
+      _pressures = List<double>.filled(5, 0);
     });
   }
 
-  Future<void> _startCalibration() async {
+  Future<void> _requestCalibrationStatus() async {
+    final rx = _rxCharacteristic;
+    if (rx == null) return;
+    try {
+      await rx.write(
+        utf8.encode('GET_CALIBRATION_STATUS'),
+        withoutResponse: false,
+      );
+      _startCalibrationTimeout(
+        const Duration(seconds: 5),
+        '보정 정보를 확인할 수 없습니다. 방석 연결을 확인해 주세요.',
+      );
+    } catch (error) {
+      _showError('보정 정보 확인 실패: $error');
+    }
+  }
+
+  void _startCalibrationTimeout(Duration duration, String message) {
+    _calibrationTimeout?.cancel();
+    _calibrationTimeout = Timer(duration, () {
+      if (!mounted || _calibrationStatus == CalibrationStatus.ready) return;
+      final waiting =
+          _calibrationStatus == CalibrationStatus.checking ||
+          _calibrationStatus == CalibrationStatus.zeroCalibrating ||
+          _calibrationStatus == CalibrationStatus.balanceCalibrating;
+      if (!waiting) return;
+      setState(() {
+        _calibrationStatus = _isFirstSetup
+            ? CalibrationStatus.balanceRequired
+            : CalibrationStatus.zeroRequired;
+        _error = message;
+      });
+    });
+  }
+
+  Future<void> _startZeroCalibration() async {
     final rx = _rxCharacteristic;
     if (rx == null) return;
     setState(() {
       _error = null;
-      _calibrationStatus = CalibrationStatus.calibrating;
+      _calibrationStatus = CalibrationStatus.zeroCalibrating;
     });
     try {
-      await rx.write(utf8.encode('CALIBRATE'), withoutResponse: false);
-      _calibrationTimeout?.cancel();
-      _calibrationTimeout = Timer(const Duration(seconds: 9), () {
-        if (!mounted || _calibrationStatus != CalibrationStatus.calibrating) {
-          return;
-        }
-        setState(() {
-          _calibrationStatus = CalibrationStatus.required;
-          _error = '캘리브레이션 응답이 없습니다. 방석 연결을 확인해 주세요.';
-        });
-      });
+      await rx.write(utf8.encode('CALIBRATE_ZERO'), withoutResponse: false);
+      _startCalibrationTimeout(
+        const Duration(seconds: 9),
+        '영점 보정 응답이 없습니다. 방석 연결을 확인해 주세요.',
+      );
     } catch (error) {
       if (!mounted) return;
-      setState(() => _calibrationStatus = CalibrationStatus.required);
-      _showError('캘리브레이션 시작 실패: $error');
+      setState(() => _calibrationStatus = CalibrationStatus.zeroRequired);
+      _showError('영점 보정 시작 실패: $error');
+    }
+  }
+
+  Future<void> _startBalanceCalibration() async {
+    final rx = _rxCharacteristic;
+    if (rx == null) return;
+    setState(() {
+      _error = null;
+      _calibrationStatus = CalibrationStatus.balanceCalibrating;
+    });
+    try {
+      await rx.write(utf8.encode('CALIBRATE_BALANCE'), withoutResponse: false);
+      _startCalibrationTimeout(
+        const Duration(seconds: 9),
+        '센서 균형 보정 응답이 없습니다. 방석 연결을 확인해 주세요.',
+      );
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _calibrationStatus = CalibrationStatus.balanceRequired);
+      _showError('센서 균형 보정 시작 실패: $error');
     }
   }
 
@@ -434,10 +542,11 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
         actions: [
           if (_isConnected && _calibrationStatus == CalibrationStatus.ready)
             IconButton(
-              onPressed: () => setState(
-                () => _calibrationStatus = CalibrationStatus.required,
-              ),
-              tooltip: '다시 캘리브레이션',
+              onPressed: () => setState(() {
+                _isFirstSetup = false;
+                _calibrationStatus = CalibrationStatus.zeroRequired;
+              }),
+              tooltip: '영점 다시 맞추기',
               icon: const Icon(Icons.tune_rounded),
             ),
           if (_isConnected)
@@ -580,7 +689,9 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
                 Expanded(
                   child: CalibrationPanel(
                     status: _calibrationStatus,
-                    onStart: _startCalibration,
+                    firstSetup: _isFirstSetup,
+                    onStartZero: _startZeroCalibration,
+                    onStartBalance: _startBalanceCalibration,
                   ),
                 ),
               ] else ...[
@@ -596,7 +707,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
                       ),
                     ),
                     Text(
-                      'RBF · 50 Hz',
+                      'RBF · 20 Hz',
                       style: Theme.of(context).textTheme.labelMedium?.copyWith(
                         color: const Color(0xff7a7f8d),
                         fontWeight: FontWeight.w700,
@@ -621,15 +732,48 @@ class CalibrationPanel extends StatelessWidget {
   const CalibrationPanel({
     super.key,
     required this.status,
-    required this.onStart,
+    required this.firstSetup,
+    required this.onStartZero,
+    required this.onStartBalance,
   });
 
   final CalibrationStatus status;
-  final VoidCallback onStart;
+  final bool firstSetup;
+  final VoidCallback onStartZero;
+  final VoidCallback onStartBalance;
 
   @override
   Widget build(BuildContext context) {
-    final calibrating = status == CalibrationStatus.calibrating;
+    final checking = status == CalibrationStatus.checking;
+    final balance =
+        status == CalibrationStatus.balanceRequired ||
+        status == CalibrationStatus.balanceCalibrating;
+    final calibrating =
+        status == CalibrationStatus.zeroCalibrating ||
+        status == CalibrationStatus.balanceCalibrating;
+    final title = checking
+        ? '보정 정보를 확인하고 있어요'
+        : balance
+        ? calibrating
+              ? '센서별 반응을 측정하고 있어요'
+              : '센서 균형을 맞춰주세요'
+        : calibrating
+        ? '영점값을 측정하고 있어요'
+        : '먼저 방석을 비워주세요';
+    final description = checking
+        ? 'ESP32에 저장된 최초 보정 정보를 불러옵니다.'
+        : balance
+        ? calibrating
+              ? '측정이 끝날 때까지 판과 기준 하중을 움직이지 마세요.'
+              : '이 단계는 처음 사용할 때 한 번만 진행합니다.'
+        : calibrating
+        ? '측정이 끝날 때까지 방석을 누르지 마세요.'
+        : '사람이나 물건이 없는 상태를 0점으로 설정합니다.';
+    final stepLabel = firstSetup
+        ? balance
+              ? '최초 설정 · 2 / 2'
+              : '최초 설정 · 1 / 2'
+        : '영점 설정 · 1 / 1';
     return SingleChildScrollView(
       child: Center(
         child: ConstrainedBox(
@@ -645,9 +789,9 @@ class CalibrationPanel extends StatelessWidget {
                   color: AppColors.corporateYellow,
                   borderRadius: BorderRadius.circular(2),
                 ),
-                child: const Text(
-                  '연결 설정 · 1 / 1',
-                  style: TextStyle(
+                child: Text(
+                  stepLabel,
+                  style: const TextStyle(
                     color: AppColors.ink,
                     fontSize: 11,
                     fontWeight: FontWeight.w800,
@@ -656,7 +800,7 @@ class CalibrationPanel extends StatelessWidget {
               ),
               const SizedBox(height: 12),
               Text(
-                calibrating ? '기준값을 측정하고 있어요' : '먼저 방석을 비워주세요',
+                title,
                 textAlign: TextAlign.center,
                 style: Theme.of(context).textTheme.headlineSmall?.copyWith(
                   fontWeight: FontWeight.w900,
@@ -664,18 +808,21 @@ class CalibrationPanel extends StatelessWidget {
               ),
               const SizedBox(height: 6),
               Text(
-                calibrating
-                    ? '측정이 끝날 때까지 방석을 누르지 마세요.'
-                    : '사람이나 물건이 없는 상태를 0점으로 설정합니다.',
+                description,
                 textAlign: TextAlign.center,
                 style: const TextStyle(color: Color(0xff747987)),
               ),
               const SizedBox(height: 8),
               SizedBox(
                 height: 290,
-                child: PressureGrid(values: List<double>.filled(6, 0)),
+                child: PressureGrid(values: List<double>.filled(5, 0)),
               ),
-              if (calibrating)
+              if (checking)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 24),
+                  child: CircularProgressIndicator(),
+                )
+              else if (calibrating)
                 TweenAnimationBuilder<double>(
                   tween: Tween(begin: 0, end: 1),
                   duration: const Duration(seconds: 5),
@@ -693,6 +840,20 @@ class CalibrationPanel extends StatelessWidget {
                     ],
                   ),
                 )
+              else if (balance)
+                const Column(
+                  children: [
+                    _CalibrationTip(
+                      icon: Icons.crop_landscape_rounded,
+                      text: '방석 전체를 덮는 단단하고 평평한 판을 올리세요.',
+                    ),
+                    SizedBox(height: 8),
+                    _CalibrationTip(
+                      icon: Icons.fitness_center_rounded,
+                      text: '판 중앙에 기준 하중을 올리고 5초 동안 고정하세요.',
+                    ),
+                  ],
+                )
               else
                 const Column(
                   children: [
@@ -708,23 +869,36 @@ class CalibrationPanel extends StatelessWidget {
                   ],
                 ),
               const SizedBox(height: 16),
-              SizedBox(
-                width: double.infinity,
-                height: 52,
-                child: FilledButton.icon(
-                  onPressed: calibrating ? null : onStart,
-                  icon: calibrating
-                      ? const SizedBox.square(
-                          dimension: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.tune_rounded),
-                  label: Text(
-                    calibrating ? '캘리브레이션 진행 중' : '5초 캘리브레이션 시작',
-                    style: const TextStyle(fontWeight: FontWeight.w800),
+              if (!checking)
+                SizedBox(
+                  width: double.infinity,
+                  height: 52,
+                  child: FilledButton.icon(
+                    onPressed: calibrating
+                        ? null
+                        : balance
+                        ? onStartBalance
+                        : onStartZero,
+                    icon: calibrating
+                        ? const SizedBox.square(
+                            dimension: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : Icon(
+                            balance
+                                ? Icons.balance_rounded
+                                : Icons.tune_rounded,
+                          ),
+                    label: Text(
+                      calibrating
+                          ? '보정 진행 중'
+                          : balance
+                          ? '5초 센서 균형 보정 시작'
+                          : '5초 영점 보정 시작',
+                      style: const TextStyle(fontWeight: FontWeight.w800),
+                    ),
                   ),
                 ),
-              ),
             ],
           ),
         ),
@@ -770,17 +944,17 @@ class PressureDemoPage extends StatefulWidget {
 }
 
 class _PressureDemoPageState extends State<PressureDemoPage> {
-  static const _initialValues = <double>[120, 460, 820, 1280, 1710, 340];
+  static const _initialValues = <double>[120, 460, 820, 1280, 1710];
 
   Timer? _timer;
   Timer? _demoCalibrationTimer;
   double _phase = 0;
   bool _isPlaying = true;
-  CalibrationStatus _demoCalibrationStatus = CalibrationStatus.required;
+  CalibrationStatus _demoCalibrationStatus = CalibrationStatus.zeroRequired;
   List<double> _values = List<double>.of(_initialValues);
 
   void _startDemoCalibration() {
-    setState(() => _demoCalibrationStatus = CalibrationStatus.calibrating);
+    setState(() => _demoCalibrationStatus = CalibrationStatus.zeroCalibrating);
     _demoCalibrationTimer?.cancel();
     _demoCalibrationTimer = Timer(const Duration(seconds: 5), () {
       if (!mounted) return;
@@ -795,7 +969,7 @@ class _PressureDemoPageState extends State<PressureDemoPage> {
       if (!mounted) return;
       _phase += .14;
       setState(() {
-        _values = List<double>.generate(6, (index) {
+        _values = List<double>.generate(5, (index) {
           final wave = (math.sin(_phase + index * .82) + 1) / 2;
           final pulse = math.max(0.0, math.sin(_phase * .58 - index * .35));
           return (60 + wave * (680 + index * 105) + pulse * 480).clamp(
@@ -845,7 +1019,9 @@ class _PressureDemoPageState extends State<PressureDemoPage> {
             padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
             child: CalibrationPanel(
               status: _demoCalibrationStatus,
-              onStart: _startDemoCalibration,
+              firstSetup: false,
+              onStartZero: _startDemoCalibration,
+              onStartBalance: _startDemoCalibration,
             ),
           ),
         ),
@@ -1085,7 +1261,7 @@ class PressureFrame {
     final text = packet.trim();
     if (!text.startsWith('P:')) return null;
     final parts = text.substring(2).split(',');
-    if (parts.length != 6) return null;
+    if (parts.length != 5) return null;
     final values = <double>[];
     for (final part in parts) {
       final value = double.tryParse(part);
@@ -1102,8 +1278,7 @@ class PressureField {
   static const sensorPositions = <Offset>[
     Offset(.28, .18),
     Offset(.72, .18),
-    Offset(.25, .50),
-    Offset(.75, .50),
+    Offset(.50, .50),
     Offset(.22, .82),
     Offset(.78, .82),
   ];
@@ -1232,12 +1407,12 @@ class PressureGrid extends StatelessWidget {
   const PressureGrid({super.key, required this.values});
 
   final List<double> values;
-  static const double displayMaximum = 2000;
+  static const double displayMaximum = 3200;
 
   @override
   Widget build(BuildContext context) {
     final sensorValues = List<double>.generate(
-      6,
+      5,
       (index) => index < values.length ? values[index] : 0,
     );
     final field = PressureField.interpolate(sensorValues);
@@ -1736,7 +1911,7 @@ class _PressureSummary extends StatelessWidget {
           const _SummaryDivider(),
           _SummaryValue(label: '최고', value: peak.toStringAsFixed(0)),
           const _SummaryDivider(),
-          _SummaryValue(label: '활성 센서', value: '$active / 6'),
+          _SummaryValue(label: '활성 센서', value: '$active / 5'),
         ],
       ),
     );

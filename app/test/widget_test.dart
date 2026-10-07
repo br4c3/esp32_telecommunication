@@ -12,9 +12,9 @@ void main() {
     expect(find.text('압력 화면 테스트'), findsOneWidget);
   });
 
-  test('parses a six-sensor pressure packet', () {
-    final frame = PressureFrame.tryParse('P:0,12,345,678,999,2000');
-    expect(frame?.values, [0, 12, 345, 678, 999, 2000]);
+  test('parses a five-sensor pressure packet', () {
+    final frame = PressureFrame.tryParse('P:0,12,345,678,999');
+    expect(frame?.values, [0, 12, 345, 678, 999]);
     expect(PressureFrame.tryParse('P:1,2,3'), isNull);
     expect(PressureFrame.tryParse('hello'), isNull);
   });
@@ -27,9 +27,9 @@ void main() {
     expect(DeviceCode.parse('12345'), isNull);
   });
 
-  test('reconstructs a fine pressure field from six sensor samples', () {
+  test('reconstructs a fine pressure field from five sensor samples', () {
     final field = PressureField.interpolate(
-      [2000, 0, 0, 0, 0, 0],
+      [2000, 0, 0, 0, 0],
       rows: 18,
       columns: 12,
     );
@@ -40,21 +40,21 @@ void main() {
     expect(field.expand((row) => row).every((value) => value >= 0), isTrue);
   });
 
-  testWidgets('pressure grid displays all six sensors', (tester) async {
+  testWidgets('pressure grid displays all five sensors', (tester) async {
     await tester.pumpWidget(
       const MaterialApp(
         home: Scaffold(
           body: SizedBox(
             width: 400,
             height: 700,
-            child: PressureGrid(values: [0, 10, 20, 30, 40, 50]),
+            child: PressureGrid(values: [0, 10, 20, 30, 40]),
           ),
         ),
       ),
     );
 
     expect(find.text('S1'), findsOneWidget);
-    expect(find.text('S6'), findsOneWidget);
+    expect(find.text('S5'), findsOneWidget);
     expect(find.text('등받이 쪽'), findsOneWidget);
     expect(find.text('방석 앞쪽'), findsOneWidget);
   });
@@ -65,15 +65,15 @@ void main() {
     await tester.pumpWidget(const MaterialApp(home: PressureDemoPage()));
 
     expect(find.text('먼저 방석을 비워주세요'), findsOneWidget);
-    await tester.ensureVisible(find.text('5초 캘리브레이션 시작'));
+    await tester.ensureVisible(find.text('5초 영점 보정 시작'));
     await tester.pump();
-    await tester.tap(find.text('5초 캘리브레이션 시작'));
+    await tester.tap(find.text('5초 영점 보정 시작'));
     await tester.pump();
-    expect(find.text('기준값을 측정하고 있어요'), findsOneWidget);
+    expect(find.text('영점값을 측정하고 있어요'), findsOneWidget);
     await tester.pump(const Duration(seconds: 5));
 
     expect(find.text('S1'), findsOneWidget);
-    expect(find.text('S6'), findsOneWidget);
+    expect(find.text('S5'), findsOneWidget);
     expect(find.text('48 × 72 압력 그리드'), findsOneWidget);
     expect(find.text('일시정지'), findsOneWidget);
 
@@ -93,8 +93,10 @@ void main() {
             width: 400,
             height: 700,
             child: CalibrationPanel(
-              status: CalibrationStatus.required,
-              onStart: () => started = true,
+              status: CalibrationStatus.zeroRequired,
+              firstSetup: false,
+              onStartZero: () => started = true,
+              onStartBalance: () {},
             ),
           ),
         ),
@@ -102,8 +104,36 @@ void main() {
     );
 
     expect(find.text('먼저 방석을 비워주세요'), findsOneWidget);
-    expect(find.text('5초 캘리브레이션 시작'), findsOneWidget);
-    await tester.tap(find.text('5초 캘리브레이션 시작'));
+    expect(find.text('5초 영점 보정 시작'), findsOneWidget);
+    await tester.tap(find.text('5초 영점 보정 시작'));
+    expect(started, isTrue);
+  });
+
+  testWidgets('first setup requests a one-time sensor balance step', (
+    tester,
+  ) async {
+    var started = false;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SizedBox(
+            width: 400,
+            height: 700,
+            child: CalibrationPanel(
+              status: CalibrationStatus.balanceRequired,
+              firstSetup: true,
+              onStartZero: () {},
+              onStartBalance: () => started = true,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('최초 설정 · 2 / 2'), findsOneWidget);
+    expect(find.text('센서 균형을 맞춰주세요'), findsOneWidget);
+    expect(find.text('5초 센서 균형 보정 시작'), findsOneWidget);
+    await tester.tap(find.text('5초 센서 균형 보정 시작'));
     expect(started, isTrue);
   });
 }
