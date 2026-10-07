@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
 void main() {
-  testWidgets('login uses cushion branding and official provider labels', (
+  testWidgets('login only shows account providers before authentication', (
     tester,
   ) async {
     await tester.pumpWidget(const MaterialApp(home: LoginPage()));
@@ -12,17 +12,23 @@ void main() {
     expect(find.byType(SeatCareCushionIcon), findsOneWidget);
     expect(find.text('Google로 계속하기'), findsOneWidget);
     expect(find.text('Apple로 계속하기'), findsOneWidget);
-    expect(find.text('기기 권한 확인'), findsOneWidget);
+    expect(find.text('기기 권한 확인'), findsNothing);
     expect(
       find.image(const AssetImage('assets/images/google_g.png')),
       findsOneWidget,
     );
+  });
 
-    await tester.tap(find.text('기기 권한 확인'));
-    await tester.pumpAndSettle();
-    expect(find.text('현재 권한 확인'), findsOneWidget);
-    expect(find.text('카메라'), findsOneWidget);
-    expect(find.text('Bluetooth'), findsOneWidget);
+  testWidgets('permission onboarding appears after login', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(home: DevicePermissionGate(onReady: (_) {})),
+    );
+
+    expect(find.text('Seat Care 사용 권한'), findsOneWidget);
+    expect(find.text('카메라 권한'), findsOneWidget);
+    expect(find.text('Bluetooth 권한'), findsOneWidget);
+    expect(find.text('카메라 허용'), findsOneWidget);
+    expect(find.text('ESP32 선택 및 연결'), findsOneWidget);
   });
 
   testWidgets('shows disconnected terminal screen', (tester) async {

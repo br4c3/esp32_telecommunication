@@ -110,6 +110,15 @@ String bluetoothErrorMessage(Object error, {required String fallback}) {
       message.contains('web bluetooth')) {
     return '이 브라우저에서는 Bluetooth 검색을 지원하지 않습니다. Chrome 또는 Edge에서 다시 시도해 주세요.';
   }
+  if (message.contains('networkerror') ||
+      message.contains('gatt') ||
+      message.contains('failed to connect')) {
+    return 'ESP32와 Bluetooth 연결을 완료하지 못했습니다. 다른 앱의 연결을 끊고 ESP32 전원을 다시 켠 뒤 시도해 주세요.';
+  }
+  if (message.contains('통신 서비스를 찾을 수 없습니다') ||
+      message.contains('송수신 채널을 찾을 수 없습니다')) {
+    return 'ESP32 통신 채널을 찾지 못했습니다. Seat Care 펌웨어가 설치되어 있는지 확인해 주세요.';
+  }
   return fallback;
 }
 
@@ -204,16 +213,14 @@ class Esp32App extends StatelessWidget {
         ),
       ),
       home: kIsWeb
-          ? AuthGate(requestBluetoothOnLaunch: requestBluetoothOnLaunch)
+          ? const AuthGate()
           : BleTerminalPage(requestBluetoothOnLaunch: requestBluetoothOnLaunch),
     );
   }
 }
 
 class AuthGate extends StatelessWidget {
-  const AuthGate({super.key, required this.requestBluetoothOnLaunch});
-
-  final bool requestBluetoothOnLaunch;
+  const AuthGate({super.key});
 
   @override
   Widget build(BuildContext context) => StreamBuilder<User?>(
@@ -223,12 +230,271 @@ class AuthGate extends StatelessWidget {
         return const Scaffold(body: Center(child: CircularProgressIndicator()));
       }
       if (snapshot.hasData) {
-        return BleTerminalPage(
-          requestBluetoothOnLaunch: requestBluetoothOnLaunch,
-        );
+        return SignedInAccessGate(key: ValueKey(snapshot.data!.uid));
       }
       return const LoginPage();
     },
+  );
+}
+
+class SignedInAccessGate extends StatefulWidget {
+  const SignedInAccessGate({super.key});
+
+  @override
+  State<SignedInAccessGate> createState() => _SignedInAccessGateState();
+}
+
+class _SignedInAccessGateState extends State<SignedInAccessGate> {
+  BluetoothDevice? _authorizedDevice;
+
+  @override
+  Widget build(BuildContext context) {
+    final device = _authorizedDevice;
+    if (device == null) {
+      return DevicePermissionGate(
+        onReady: (selected) => setState(() => _authorizedDevice = selected),
+      );
+    }
+    return BleTerminalPage(
+      requestBluetoothOnLaunch: false,
+      initialDevice: device,
+    );
+  }
+}
+
+class DevicePermissionGate extends StatefulWidget {
+  const DevicePermissionGate({super.key, required this.onReady});
+
+  final ValueChanged<BluetoothDevice> onReady;
+
+  @override
+  State<DevicePermissionGate> createState() => _DevicePermissionGateState();
+}
+
+class _DevicePermissionGateState extends State<DevicePermissionGate> {
+  static final Guid _serviceId = Guid('6E400001-B5A3-F393-E0A9-E50E24DCCA9E');
+
+  bool _cameraGranted = false;
+  bool _requestingCamera = false;
+  bool _requestingBluetooth = false;
+  String? _error;
+
+  Future<void> _requestCamera() async {
+    setState(() {
+      _requestingCamera = true;
+      _error = null;
+    });
+    try {
+      final status = await Permission.camera.request();
+      if (!mounted) return;
+      setState(() {
+        _cameraGranted = status.isGranted || status.isLimited;
+        if (!_cameraGranted) {
+          _error = 'QR 스캔을 사용하려면 카메라 권한을 허용해 주세요.';
+        }
+      });
+    } catch (_) {
+      if (mounted) {
+        setState(() => _error = '카메라 권한을 요청하지 못했습니다. 브라우저 설정을 확인해 주세요.');
+      }
+    } finally {
+      if (mounted) setState(() => _requestingCamera = false);
+    }
+  }
+
+  Future<void> _requestBluetooth() async {
+    setState(() {
+      _requestingBluetooth = true;
+      _error = null;
+    });
+    try {
+      final selectedDevice = FlutterBluePlus.onScanResults
+          .expand((results) => results)
+          .first
+          .timeout(const Duration(seconds: 20));
+      // This call must remain directly in the button handler. Browsers only
+      // grant Web Bluetooth access through a user-triggered device chooser.
+      await FlutterBluePlus.startScan(
+        withServices: [_serviceId],
+        webOptionalServices: [_serviceId],
+        timeout: const Duration(seconds: 20),
+      );
+      final result = await selectedDevice;
+      await FlutterBluePlus.stopScan();
+      if (mounted) widget.onReady(result.device);
+    } catch (error) {
+      await FlutterBluePlus.stopScan();
+      if (mounted) {
+        setState(() {
+          _error = bluetoothErrorMessage(
+            error,
+            fallback: 'ESP32 Bluetooth 권한을 받지 못했습니다. 전원을 확인하고 다시 시도해 주세요.',
+          );
+        });
+      }
+    } finally {
+      if (mounted) setState(() => _requestingBluetooth = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(
+      title: const Text('시작 전 권한 설정'),
+      actions: [
+        IconButton(
+          onPressed: () => FirebaseAuth.instance.signOut(),
+          tooltip: '로그아웃',
+          icon: const Icon(Icons.logout_rounded),
+        ),
+        const SizedBox(width: 8),
+      ],
+    ),
+    body: SafeArea(
+      child: Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(24),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 460),
+            child: Card(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    const Center(child: SeatCareCushionIcon(size: 60)),
+                    const SizedBox(height: 16),
+                    Text(
+                      'Seat Care 사용 권한',
+                      textAlign: TextAlign.center,
+                      style: Theme.of(context).textTheme.headlineSmall
+                          ?.copyWith(fontWeight: FontWeight.w900),
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'QR 인식과 방석 연결에 필요한 권한을 먼저 허용해 주세요.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: Color(0xff6f7482)),
+                    ),
+                    const SizedBox(height: 24),
+                    _AccessStep(
+                      number: 1,
+                      icon: Icons.qr_code_scanner_rounded,
+                      title: '카메라 권한',
+                      description: _cameraGranted
+                          ? '허용 완료'
+                          : '방석의 QR 코드를 인식할 때 사용합니다.',
+                      complete: _cameraGranted,
+                      buttonLabel: _requestingCamera ? '요청 중…' : '카메라 허용',
+                      onPressed: _requestingCamera || _cameraGranted
+                          ? null
+                          : _requestCamera,
+                    ),
+                    const SizedBox(height: 12),
+                    _AccessStep(
+                      number: 2,
+                      icon: Icons.bluetooth_rounded,
+                      title: 'Bluetooth 권한',
+                      description: _cameraGranted
+                          ? '브라우저 목록에서 Seat Care ESP32를 선택하세요.'
+                          : '카메라 권한을 먼저 허용해 주세요.',
+                      complete: false,
+                      buttonLabel: _requestingBluetooth
+                          ? '기기 선택 중…'
+                          : 'ESP32 선택 및 연결',
+                      onPressed: !_cameraGranted || _requestingBluetooth
+                          ? null
+                          : _requestBluetooth,
+                    ),
+                    if (_error != null) ...[
+                      const SizedBox(height: 14),
+                      _ErrorNotice(
+                        message: _error!,
+                        onDismiss: () => setState(() => _error = null),
+                      ),
+                    ],
+                    const SizedBox(height: 16),
+                    const Text(
+                      '권한은 QR 인식과 ESP32 통신에만 사용됩니다. 웹 Bluetooth는 기기를 선택해야 권한이 부여됩니다.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(fontSize: 11, color: Color(0xff7a7f8d)),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+class _AccessStep extends StatelessWidget {
+  const _AccessStep({
+    required this.number,
+    required this.icon,
+    required this.title,
+    required this.description,
+    required this.complete,
+    required this.buttonLabel,
+    required this.onPressed,
+  });
+
+  final int number;
+  final IconData icon;
+  final String title;
+  final String description;
+  final bool complete;
+  final String buttonLabel;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.all(16),
+    decoration: BoxDecoration(
+      color: complete ? const Color(0xffe9f8f2) : const Color(0xfff7f7f3),
+      border: Border.all(
+        color: complete ? const Color(0xff00a67e) : const Color(0xffd5d5ce),
+      ),
+      borderRadius: BorderRadius.circular(8),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            CircleAvatar(
+              radius: 17,
+              backgroundColor: complete
+                  ? const Color(0xff00a67e)
+                  : AppColors.corporateYellow,
+              foregroundColor: complete ? Colors.white : AppColors.ink,
+              child: complete
+                  ? const Icon(Icons.check_rounded, size: 20)
+                  : Text(
+                      '$number',
+                      style: const TextStyle(fontWeight: FontWeight.w900),
+                    ),
+            ),
+            const SizedBox(width: 12),
+            Icon(icon, size: 22),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                title,
+                style: const TextStyle(fontWeight: FontWeight.w900),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        Text(description, style: const TextStyle(color: Color(0xff646976))),
+        const SizedBox(height: 12),
+        FilledButton(onPressed: onPressed, child: Text(buttonLabel)),
+      ],
+    ),
   );
 }
 
@@ -241,9 +507,6 @@ class LoginPage extends StatefulWidget {
 
 class _LoginPageState extends State<LoginPage> {
   bool _submitting = false;
-  bool _checkingPermissions = false;
-  String _cameraPermission = 'QR 스캔 시 요청';
-  String _bluetoothPermission = '기기 연결 시 요청';
   String? _message;
 
   String _authMessage(Object error) {
@@ -288,51 +551,6 @@ class _LoginPageState extends State<LoginPage> {
     await _signIn(provider);
   }
 
-  Future<void> _checkDevicePermissions() async {
-    setState(() => _checkingPermissions = true);
-
-    var cameraMessage = 'QR 화면에서 권한을 요청합니다';
-    var bluetoothMessage = '연결 화면에서 권한을 요청합니다';
-    try {
-      final cameraStatus = await Permission.camera.status;
-      cameraMessage = switch (cameraStatus) {
-        PermissionStatus.granted || PermissionStatus.limited => '허용됨',
-        PermissionStatus.permanentlyDenied ||
-        PermissionStatus.restricted => '브라우저 또는 시스템 설정에서 허용 필요',
-        _ => '아직 허용되지 않음 · QR 스캔 시 요청',
-      };
-    } catch (_) {
-      cameraMessage = 'QR 스캔 시 브라우저에서 확인';
-    }
-
-    try {
-      if (kIsWeb) {
-        final supported = await FlutterBluePlus.isSupported;
-        bluetoothMessage = supported
-            ? '사용 가능 · 연결 버튼을 누르면 요청'
-            : '이 브라우저에서는 지원되지 않음';
-      } else if (Platform.isAndroid) {
-        final scan = await Permission.bluetoothScan.status;
-        final connect = await Permission.bluetoothConnect.status;
-        bluetoothMessage = scan.isGranted && connect.isGranted
-            ? '허용됨'
-            : '아직 허용되지 않음 · 기기 연결 시 요청';
-      } else {
-        final status = await Permission.bluetooth.status;
-        bluetoothMessage = status.isGranted ? '허용됨' : '아직 허용되지 않음 · 기기 연결 시 요청';
-      }
-    } catch (_) {
-      bluetoothMessage = '기기 연결 시 브라우저에서 확인';
-    }
-
-    if (!mounted) return;
-    setState(() {
-      _cameraPermission = cameraMessage;
-      _bluetoothPermission = bluetoothMessage;
-      _checkingPermissions = false;
-    });
-  }
-
   @override
   Widget build(BuildContext context) => Scaffold(
     body: SafeArea(
@@ -362,83 +580,7 @@ class _LoginPageState extends State<LoginPage> {
                       textAlign: TextAlign.center,
                       style: TextStyle(color: Color(0xff6f7482)),
                     ),
-                    const SizedBox(height: 18),
-                    Container(
-                      decoration: BoxDecoration(
-                        color: const Color(0xfff7f7f3),
-                        border: Border.all(color: const Color(0xffd5d5ce)),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      clipBehavior: Clip.antiAlias,
-                      child: ExpansionTile(
-                        tilePadding: const EdgeInsets.symmetric(horizontal: 14),
-                        childrenPadding: const EdgeInsets.fromLTRB(
-                          14,
-                          0,
-                          14,
-                          14,
-                        ),
-                        leading: const Icon(
-                          Icons.verified_user_outlined,
-                          size: 21,
-                          color: AppColors.ink,
-                        ),
-                        title: const Text(
-                          '기기 권한 확인',
-                          style: TextStyle(
-                            fontSize: 14,
-                            fontWeight: FontWeight.w800,
-                          ),
-                        ),
-                        subtitle: const Text(
-                          '카메라 · Bluetooth',
-                          style: TextStyle(fontSize: 11),
-                        ),
-                        children: [
-                          _PermissionStatusRow(
-                            icon: Icons.qr_code_scanner_rounded,
-                            title: '카메라',
-                            description: _cameraPermission,
-                          ),
-                          const SizedBox(height: 10),
-                          _PermissionStatusRow(
-                            icon: Icons.bluetooth_rounded,
-                            title: 'Bluetooth',
-                            description: _bluetoothPermission,
-                          ),
-                          const SizedBox(height: 12),
-                          SizedBox(
-                            width: double.infinity,
-                            child: OutlinedButton.icon(
-                              onPressed: _checkingPermissions
-                                  ? null
-                                  : _checkDevicePermissions,
-                              icon: _checkingPermissions
-                                  ? const SizedBox.square(
-                                      dimension: 16,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                      ),
-                                    )
-                                  : const Icon(Icons.refresh_rounded, size: 18),
-                              label: Text(
-                                _checkingPermissions ? '확인 중…' : '현재 권한 확인',
-                              ),
-                            ),
-                          ),
-                          const SizedBox(height: 8),
-                          const Text(
-                            '권한은 로그인 후 해당 기능을 사용할 때만 요청하며, Bluetooth 선택창은 연결 버튼을 직접 눌러야 열립니다.',
-                            style: TextStyle(
-                              fontSize: 11,
-                              height: 1.45,
-                              color: Color(0xff6f7482),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 18),
+                    const SizedBox(height: 26),
                     SizedBox(
                       height: 50,
                       child: OutlinedButton(
@@ -525,47 +667,6 @@ class _LoginPageState extends State<LoginPage> {
         ),
       ),
     ),
-  );
-}
-
-class _PermissionStatusRow extends StatelessWidget {
-  const _PermissionStatusRow({
-    required this.icon,
-    required this.title,
-    required this.description,
-  });
-
-  final IconData icon;
-  final String title;
-  final String description;
-
-  @override
-  Widget build(BuildContext context) => Row(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: [
-      Icon(icon, size: 19, color: AppColors.ink),
-      const SizedBox(width: 10),
-      Expanded(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              title,
-              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w800),
-            ),
-            const SizedBox(height: 2),
-            Text(
-              description,
-              style: const TextStyle(
-                fontSize: 11,
-                height: 1.35,
-                color: Color(0xff6f7482),
-              ),
-            ),
-          ],
-        ),
-      ),
-    ],
   );
 }
 
@@ -676,9 +777,14 @@ class _SeatCareCushionPainter extends CustomPainter {
 }
 
 class BleTerminalPage extends StatefulWidget {
-  const BleTerminalPage({super.key, required this.requestBluetoothOnLaunch});
+  const BleTerminalPage({
+    super.key,
+    required this.requestBluetoothOnLaunch,
+    this.initialDevice,
+  });
 
   final bool requestBluetoothOnLaunch;
+  final BluetoothDevice? initialDevice;
 
   @override
   State<BleTerminalPage> createState() => _BleTerminalPageState();
@@ -700,6 +806,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
   bool _isScanning = false;
   bool _isConnecting = false;
   bool _isConnected = false;
+  String? _connectionStage;
   CalibrationStatus _calibrationStatus = CalibrationStatus.checking;
   bool _isFirstSetup = false;
   List<int> _warningSensors = const [];
@@ -732,7 +839,11 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
       onError: (Object error) => _reportBluetoothError(error, '기기 검색에 실패했습니다.'),
     );
 
-    if (widget.requestBluetoothOnLaunch) {
+    if (widget.initialDevice != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _connect(widget.initialDevice!);
+      });
+    } else if (widget.requestBluetoothOnLaunch) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _requestBluetoothOnLaunch();
       });
@@ -847,6 +958,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
     setState(() {
       _error = null;
       _isScanning = true;
+      _connectionStage = '브라우저에서 ESP32를 선택해 주세요';
       _devices.clear();
     });
     try {
@@ -864,18 +976,24 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
 
       final matchingDevice = FlutterBluePlus.onScanResults
           .expand((results) => results)
-          .firstWhere((result) => DeviceCode.fromScanResult(result) == code)
+          .firstWhere((result) {
+            final advertisedCode = DeviceCode.fromScanResult(result);
+            // Older Seat Care firmware used a fixed Bluetooth name. On web,
+            // the service-filtered browser chooser is already a deliberate
+            // user selection, so accept that legacy device when no code is
+            // present. Still reject a different modern device code.
+            return advertisedCode == code || (kIsWeb && advertisedCode == null);
+          })
           .timeout(
             const Duration(seconds: 12),
             onTimeout: () =>
                 throw TimeoutException('기기 코드 $code에 해당하는 ESP32를 찾지 못했습니다.'),
           );
       await FlutterBluePlus.startScan(
-        // On web, an exact name filter keeps the browser chooser tied to the
-        // code read from the QR label. The service is requested separately so
-        // GATT discovery remains authorized after the user selects the device.
-        withServices: kIsWeb ? const [] : [_serviceId],
-        withNames: kIsWeb ? ['ESP32-P-$code'] : const [],
+        // A service filter supports both current ESP32-P-xxxxxx advertising
+        // names and older Seat Care firmware names. optionalServices grants
+        // access to the same GATT service after browser selection.
+        withServices: [_serviceId],
         webOptionalServices: [_serviceId],
         timeout: const Duration(seconds: 12),
       );
@@ -889,7 +1007,12 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
       await FlutterBluePlus.stopScan();
       _reportBluetoothError(error, '기기 코드와 일치하는 ESP32에 연결하지 못했습니다.');
     } finally {
-      if (mounted) setState(() => _isScanning = false);
+      if (mounted) {
+        setState(() {
+          _isScanning = false;
+          if (!_isConnecting) _connectionStage = null;
+        });
+      }
     }
   }
 
@@ -897,6 +1020,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
     setState(() {
       _error = null;
       _isConnecting = true;
+      _connectionStage = 'ESP32에 연결을 요청하고 있어요';
     });
     try {
       await FlutterBluePlus.stopScan();
@@ -904,6 +1028,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
         license: License.nonprofit,
         timeout: const Duration(seconds: 15),
       );
+      if (mounted) setState(() => _connectionStage = '통신 서비스를 확인하고 있어요');
       if (!kIsWeb && Platform.isAndroid) await device.requestMtu(64);
       _device = device;
       await _connectionSubscription?.cancel();
@@ -920,7 +1045,13 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
         }
       });
 
-      final services = await device.discoverServices();
+      var services = await device.discoverServices();
+      if (!services.any((item) => item.uuid == _serviceId)) {
+        // Some browser/ESP32 combinations need a short interval after GATT
+        // connection before custom services become visible.
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+        services = await device.discoverServices();
+      }
       final service = services
           .where((item) => item.uuid == _serviceId)
           .firstOrNull;
@@ -938,6 +1069,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
       }
 
       await _notificationSubscription?.cancel();
+      if (mounted) setState(() => _connectionStage = '압력 데이터 채널을 준비하고 있어요');
       _notificationSubscription = tx.onValueReceived.listen((bytes) {
         if (!mounted) return;
         final text = utf8.decode(bytes, allowMalformed: true);
@@ -1023,6 +1155,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
       if (mounted) {
         setState(() {
           _isConnected = true;
+          _connectionStage = null;
           _calibrationStatus = CalibrationStatus.checking;
         });
       }
@@ -1031,7 +1164,12 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
       await device.disconnect();
       _reportBluetoothError(error, 'ESP32 연결에 실패했습니다.');
     } finally {
-      if (mounted) setState(() => _isConnecting = false);
+      if (mounted) {
+        setState(() {
+          _isConnecting = false;
+          if (!_isConnected) _connectionStage = null;
+        });
+      }
     }
   }
 
@@ -1238,8 +1376,10 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
             children: [
               _StatusCard(
                 connected: _isConnected,
-                connecting: _isConnecting,
+                connecting:
+                    _isConnecting || (_isScanning && _connectionStage != null),
                 deviceName: _device?.platformName,
+                connectionStage: _connectionStage,
               ),
               if (_error != null) ...[
                 const SizedBox(height: 12),
@@ -2540,10 +2680,12 @@ class _StatusCard extends StatelessWidget {
     required this.connected,
     required this.connecting,
     this.deviceName,
+    this.connectionStage,
   });
   final bool connected;
   final bool connecting;
   final String? deviceName;
+  final String? connectionStage;
 
   @override
   Widget build(BuildContext context) {
@@ -2560,7 +2702,7 @@ class _StatusCard extends StatelessWidget {
     final description = connected
         ? '압력 데이터를 실시간으로 수신하고 있어요'
         : connecting
-        ? '잠시만 기다려 주세요'
+        ? connectionStage ?? '잠시만 기다려 주세요'
         : 'Bluetooth로 ESP32를 연결해 주세요';
     return Card(
       shape: RoundedRectangleBorder(
