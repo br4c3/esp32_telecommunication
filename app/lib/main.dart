@@ -48,7 +48,7 @@ class _FirebaseBootstrapState extends State<FirebaseBootstrap> {
               child: Padding(
                 padding: const EdgeInsets.all(24),
                 child: Text(
-                  'Firebase 연결에 실패했습니다.\n${snapshot.error}',
+                  'Firebase 연결에 실패했습니다. 잠시 후 새로고침해 주세요.',
                   textAlign: TextAlign.center,
                 ),
               ),
@@ -84,6 +84,45 @@ abstract final class AppColors {
   static const canvas = Color(0xffe7e7e1);
   static const surface = Color(0xfff1f1ec);
 }
+
+String bluetoothErrorMessage(Object error, {required String fallback}) {
+  final message = error.toString().toLowerCase();
+  if (error is TimeoutException || message.contains('timeout')) {
+    return '시간 안에 ESP32를 찾지 못했습니다. 전원과 거리를 확인한 뒤 다시 시도해 주세요.';
+  }
+  if (message.contains('notfounderror') ||
+      message.contains('cancelled') ||
+      message.contains('canceled') ||
+      message.contains('user cancelled')) {
+    return 'Bluetooth 기기 선택이 취소되었습니다.';
+  }
+  if (message.contains('user gesture')) {
+    return 'Bluetooth 검색 버튼을 직접 눌러 기기를 선택해 주세요.';
+  }
+  if (message.contains('notallowederror') ||
+      message.contains('permission') ||
+      message.contains('securityerror')) {
+    return 'Bluetooth 권한이 거부되었습니다. 브라우저 설정에서 권한을 허용해 주세요.';
+  }
+  if (message.contains('not supported') ||
+      message.contains('unsupported') ||
+      message.contains('webbluetooth') ||
+      message.contains('web bluetooth')) {
+    return '이 브라우저에서는 Bluetooth 검색을 지원하지 않습니다. Chrome 또는 Edge에서 다시 시도해 주세요.';
+  }
+  return fallback;
+}
+
+String scannerErrorMessage(MobileScannerException error) =>
+    switch (error.errorCode) {
+      MobileScannerErrorCode.permissionDenied =>
+        '카메라 권한이 거부되었습니다. 브라우저 설정에서 카메라를 허용해 주세요.',
+      MobileScannerErrorCode.unsupported => '이 기기에서는 카메라 스캔을 지원하지 않습니다.',
+      MobileScannerErrorCode.controllerAlreadyInitialized ||
+      MobileScannerErrorCode.controllerInitializing =>
+        '카메라를 준비하고 있습니다. 잠시 후 다시 시도해 주세요.',
+      _ => '카메라를 시작할 수 없습니다. 권한과 카메라 상태를 확인해 주세요.',
+    };
 
 class Esp32App extends StatelessWidget {
   const Esp32App({super.key, this.requestBluetoothOnLaunch = true});
@@ -213,7 +252,7 @@ class _LoginPageState extends State<LoginPage> {
         '같은 이메일이 다른 로그인 방식으로 이미 가입되어 있습니다.',
       'operation-not-allowed' => 'Firebase Console에서 해당 로그인 제공자를 활성화해 주세요.',
       'too-many-requests' => '요청이 너무 많습니다. 잠시 후 다시 시도해 주세요.',
-      _ => error.message ?? '로그인 처리 중 오류가 발생했습니다.',
+      _ => '로그인 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.',
     };
   }
 
@@ -347,29 +386,34 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
   CalibrationStatus _calibrationStatus = CalibrationStatus.checking;
   bool _isFirstSetup = false;
   List<int> _warningSensors = const [];
+  String? _pendingDeviceCode;
   String? _error;
   List<double> _pressures = List<double>.filled(5, 0);
 
   @override
   void initState() {
     super.initState();
-    _scanSubscription = FlutterBluePlus.onScanResults.listen((results) {
-      if (!mounted) return;
-      setState(() {
-        for (final result in results) {
-          final name = result.advertisementData.advName.isNotEmpty
-              ? result.advertisementData.advName
-              : result.device.platformName;
-          final advertisesService = result.advertisementData.serviceUuids
-              .contains(_serviceId);
-          if (name == 'ESP32-Pressure-6' ||
-              name == 'ESP32-ADS1115' ||
-              advertisesService) {
-            _devices[result.device.remoteId] = result;
+    _scanSubscription = FlutterBluePlus.onScanResults.listen(
+      (results) {
+        if (!mounted) return;
+        setState(() {
+          for (final result in results) {
+            final name = result.advertisementData.advName.isNotEmpty
+                ? result.advertisementData.advName
+                : result.device.platformName;
+            final advertisesService = result.advertisementData.serviceUuids
+                .contains(_serviceId);
+            if (DeviceCode.parse(name) != null ||
+                name == 'ESP32-Pressure-6' ||
+                name == 'ESP32-ADS1115' ||
+                advertisesService) {
+              _devices[result.device.remoteId] = result;
+            }
           }
-        }
-      });
-    }, onError: (Object error) => _showError('Scan failed: $error'));
+        });
+      },
+      onError: (Object error) => _reportBluetoothError(error, '기기 검색에 실패했습니다.'),
+    );
 
     if (widget.requestBluetoothOnLaunch) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -382,12 +426,10 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
     try {
       final granted = await _requestPermissions();
       if (!granted) {
-        _showError(
-          'Bluetooth permission is required. Enable it in system settings.',
-        );
+        _showError('Bluetooth 권한이 필요합니다. 시스템 설정에서 권한을 허용해 주세요.');
       }
     } catch (error) {
-      _showError('Could not request Bluetooth permission: $error');
+      _reportBluetoothError(error, 'Bluetooth 권한을 확인할 수 없습니다.');
     }
   }
 
@@ -414,8 +456,31 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
 
   Future<void> _startScan() async {
     setState(() => _error = null);
+
+    // Web Bluetooth must be started directly from the button's user gesture.
+    // Awaiting permission or adapter checks first makes browsers reject the
+    // chooser request even when Bluetooth is available.
+    if (kIsWeb) {
+      setState(() {
+        _devices.clear();
+        _isScanning = true;
+      });
+      try {
+        await FlutterBluePlus.startScan(
+          withServices: [_serviceId],
+          timeout: const Duration(seconds: 8),
+        );
+        await FlutterBluePlus.isScanning.where((value) => !value).first;
+      } catch (error) {
+        _reportBluetoothError(error, '기기 검색에 실패했습니다.');
+      } finally {
+        if (mounted) setState(() => _isScanning = false);
+      }
+      return;
+    }
+
     if (!await _requestPermissions()) {
-      _showError('Bluetooth permission is required to find the ESP32.');
+      _showError('ESP32를 찾으려면 Bluetooth 권한이 필요합니다.');
       return;
     }
 
@@ -424,7 +489,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
           .where((state) => state != BluetoothAdapterState.unknown)
           .first;
       if (adapterState != BluetoothAdapterState.on) {
-        _showError('Turn on Bluetooth, then scan again.');
+        _showError('Bluetooth를 켠 뒤 다시 검색해 주세요.');
         return;
       }
       setState(() {
@@ -437,7 +502,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
       );
       await FlutterBluePlus.isScanning.where((value) => !value).first;
     } catch (error) {
-      _showError('Could not scan: $error');
+      _reportBluetoothError(error, '기기 검색에 실패했습니다.');
     } finally {
       if (mounted) setState(() => _isScanning = false);
     }
@@ -449,20 +514,34 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
     );
     if (!mounted || code == null) return;
 
+    if (kIsWeb) {
+      setState(() {
+        _pendingDeviceCode = code;
+        _error = null;
+      });
+      return;
+    }
+
+    await _connectToDeviceCode(code);
+  }
+
+  Future<void> _connectToDeviceCode(String code) async {
     setState(() {
       _error = null;
       _isScanning = true;
       _devices.clear();
     });
     try {
-      if (!await _requestPermissions()) {
+      if (!kIsWeb && !await _requestPermissions()) {
         throw StateError('Bluetooth 권한이 필요합니다.');
       }
-      final adapterState = await FlutterBluePlus.adapterState
-          .where((state) => state != BluetoothAdapterState.unknown)
-          .first;
-      if (adapterState != BluetoothAdapterState.on) {
-        throw StateError('Bluetooth를 켠 뒤 다시 시도해 주세요.');
+      if (!kIsWeb) {
+        final adapterState = await FlutterBluePlus.adapterState
+            .where((state) => state != BluetoothAdapterState.unknown)
+            .first;
+        if (adapterState != BluetoothAdapterState.on) {
+          throw StateError('Bluetooth를 켠 뒤 다시 시도해 주세요.');
+        }
       }
 
       final matchingDevice = FlutterBluePlus.onScanResults
@@ -479,10 +558,13 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
       );
       final result = await matchingDevice;
       await FlutterBluePlus.stopScan();
-      if (mounted) await _connect(result.device);
+      if (mounted) {
+        setState(() => _pendingDeviceCode = null);
+        await _connect(result.device);
+      }
     } catch (error) {
       await FlutterBluePlus.stopScan();
-      _showError('바코드 연결 실패: $error');
+      _reportBluetoothError(error, '기기 코드와 일치하는 ESP32에 연결하지 못했습니다.');
     } finally {
       if (mounted) setState(() => _isScanning = false);
     }
@@ -519,7 +601,9 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
       final service = services
           .where((item) => item.uuid == _serviceId)
           .firstOrNull;
-      if (service == null) throw StateError('ESP32 BLE service was not found.');
+      if (service == null) {
+        throw StateError('ESP32 통신 서비스를 찾을 수 없습니다.');
+      }
       _rxCharacteristic = service.characteristics
           .where((item) => item.uuid == _rxId)
           .firstOrNull;
@@ -527,7 +611,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
           .where((item) => item.uuid == _txId)
           .firstOrNull;
       if (_rxCharacteristic == null || tx == null) {
-        throw StateError('ESP32 RX/TX characteristics were not found.');
+        throw StateError('ESP32 송수신 채널을 찾을 수 없습니다.');
       }
 
       await _notificationSubscription?.cancel();
@@ -622,7 +706,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
       await _requestCalibrationStatus();
     } catch (error) {
       await device.disconnect();
-      _showError('Connection failed: $error');
+      _reportBluetoothError(error, 'ESP32 연결에 실패했습니다.');
     } finally {
       if (mounted) setState(() => _isConnecting = false);
     }
@@ -655,7 +739,8 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
         '보정 정보를 확인할 수 없습니다. 방석 연결을 확인해 주세요.',
       );
     } catch (error) {
-      _showError('보정 정보 확인 실패: $error');
+      debugPrint('보정 정보 확인 오류: $error');
+      _showError('보정 정보를 확인하지 못했습니다. 방석 연결을 확인해 주세요.');
     }
   }
 
@@ -692,8 +777,9 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
       );
     } catch (error) {
       if (!mounted) return;
+      debugPrint('영점 보정 시작 오류: $error');
       setState(() => _calibrationStatus = CalibrationStatus.zeroRequired);
-      _showError('영점 보정 시작 실패: $error');
+      _showError('영점 보정을 시작하지 못했습니다. 방석 연결을 확인해 주세요.');
     }
   }
 
@@ -712,8 +798,9 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
       );
     } catch (error) {
       if (!mounted) return;
+      debugPrint('센서 균형 보정 시작 오류: $error');
       setState(() => _calibrationStatus = CalibrationStatus.balanceRequired);
-      _showError('센서 균형 보정 시작 실패: $error');
+      _showError('센서 균형 보정을 시작하지 못했습니다. 방석 연결을 확인해 주세요.');
     }
   }
 
@@ -747,12 +834,18 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
     try {
       await rx.write(utf8.encode(command), withoutResponse: false);
     } catch (error) {
-      _showError('보정 계속 진행 실패: $error');
+      debugPrint('보정 계속 진행 오류: $error');
+      _showError('보정을 계속 진행하지 못했습니다. 방석 연결을 확인해 주세요.');
     }
   }
 
   void _showError(String message) {
     if (mounted) setState(() => _error = message);
+  }
+
+  void _reportBluetoothError(Object error, String fallback) {
+    debugPrint('Bluetooth 오류: $error');
+    _showError(bluetoothErrorMessage(error, fallback: fallback));
   }
 
   @override
@@ -882,7 +975,9 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
                         child: FilledButton.icon(
                           onPressed: _isScanning || _isConnecting
                               ? null
-                              : _scanDeviceCode,
+                              : _pendingDeviceCode == null
+                              ? _scanDeviceCode
+                              : () => _connectToDeviceCode(_pendingDeviceCode!),
                           icon: _isScanning
                               ? const SizedBox.square(
                                   dimension: 18,
@@ -890,9 +985,17 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
                                     strokeWidth: 2,
                                   ),
                                 )
-                              : const Icon(Icons.qr_code_scanner_rounded),
+                              : Icon(
+                                  _pendingDeviceCode == null
+                                      ? Icons.qr_code_scanner_rounded
+                                      : Icons.bluetooth_searching_rounded,
+                                ),
                           label: Text(
-                            _isScanning ? '기기 확인 중…' : '기기 코드 스캔',
+                            _isScanning
+                                ? '기기 확인 중…'
+                                : _pendingDeviceCode == null
+                                ? '기기 코드 스캔'
+                                : 'Bluetooth 기기 선택 ($_pendingDeviceCode)',
                             style: const TextStyle(fontWeight: FontWeight.w700),
                           ),
                         ),
@@ -914,6 +1017,17 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
                     ),
                   ],
                 ),
+                if (_pendingDeviceCode != null) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    'QR 확인 완료 · 버튼을 눌러 같은 코드의 Bluetooth 기기를 선택하세요.',
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: const Color(0xff5f6470),
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 12),
                 Expanded(
                   child: _devices.isEmpty
@@ -926,7 +1040,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
                             final name = advertisedName.isNotEmpty
                                 ? advertisedName
                                 : result.device.platformName.isEmpty
-                                ? 'ESP32 device'
+                                ? 'ESP32 기기'
                                 : result.device.platformName;
                             return Padding(
                               padding: const EdgeInsets.only(bottom: 10),
@@ -1585,7 +1699,33 @@ class _DeviceCodeScannerPageState extends State<DeviceCodeScannerPage> {
     body: Stack(
       fit: StackFit.expand,
       children: [
-        MobileScanner(onDetect: _onDetect),
+        MobileScanner(
+          onDetect: _onDetect,
+          errorBuilder: (context, error) => ColoredBox(
+            color: Colors.black,
+            child: Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(
+                      Icons.no_photography_outlined,
+                      color: Colors.white,
+                      size: 48,
+                    ),
+                    const SizedBox(height: 16),
+                    Text(
+                      scannerErrorMessage(error),
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(color: Colors.white),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
         IgnorePointer(child: CustomPaint(painter: _ScannerOverlayPainter())),
         Positioned(
           left: 24,

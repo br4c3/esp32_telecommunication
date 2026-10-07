@@ -1,6 +1,7 @@
 import 'package:esp32_telecommunication/main.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter/material.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
 
 void main() {
   testWidgets('shows disconnected terminal screen', (tester) async {
@@ -25,6 +26,41 @@ void main() {
     expect(DeviceCode.parse('ABC123'), 'ABC123');
     expect(DeviceCode.parse('ESP32-Pressure-6'), isNull);
     expect(DeviceCode.parse('12345'), isNull);
+  });
+
+  test('translates Bluetooth failures into Korean guidance', () {
+    expect(
+      bluetoothErrorMessage(
+        Exception('NotFoundError: User cancelled the requestDevice chooser.'),
+        fallback: '검색 실패',
+      ),
+      'Bluetooth 기기 선택이 취소되었습니다.',
+    );
+    expect(
+      bluetoothErrorMessage(
+        Exception('requestDevice() must be called from a user gesture'),
+        fallback: '검색 실패',
+      ),
+      'Bluetooth 검색 버튼을 직접 눌러 기기를 선택해 주세요.',
+    );
+    expect(
+      bluetoothErrorMessage(
+        Exception('Web Bluetooth is not supported'),
+        fallback: '검색 실패',
+      ),
+      contains('Chrome 또는 Edge'),
+    );
+  });
+
+  test('translates camera scanner failures into Korean guidance', () {
+    expect(
+      scannerErrorMessage(
+        const MobileScannerException(
+          errorCode: MobileScannerErrorCode.permissionDenied,
+        ),
+      ),
+      contains('카메라 권한이 거부되었습니다'),
+    );
   });
 
   test('reconstructs a fine pressure field from five sensor samples', () {
