@@ -781,6 +781,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
   final List<PostureHistorySample> _postureHistory = [];
   final Map<String, DailyPostureRecord> _dailyHistory = {};
   SharedPreferencesAsync? _preferences;
+  bool _historyLoaded = false;
   Timer? _historySaveTimer;
   Timer? _historyRecordTimer;
   late DateTime _selectedHistoryDate;
@@ -796,13 +797,16 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
     try {
       _preferences = SharedPreferencesAsync();
       _loadDailyHistory();
-      _historyRecordTimer = Timer.periodic(
-        const Duration(seconds: 1),
-        (_) => _recordDailyHistoryTick(),
-      );
     } catch (error) {
+      _historyLoaded = true;
       debugPrint('자세 기록 저장소 준비 오류: $error');
     }
+    // 저장소나 센서 상태와 무관하게 오늘의 기록은 즉시 시작합니다.
+    _recordDailyHistoryTick();
+    _historyRecordTimer = Timer.periodic(
+      const Duration(seconds: 1),
+      (_) => _recordDailyHistoryTick(),
+    );
     _scanSubscription = FlutterBluePlus.onScanResults.listen(
       (results) {
         if (!mounted) return;
@@ -861,9 +865,23 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
           records[entry.key] = DailyPostureRecord.fromJson(entry.value);
         }
       }
-      if (mounted) setState(() => _dailyHistory.addAll(records));
+      if (mounted) {
+        setState(() {
+          for (final entry in records.entries) {
+            final current = _dailyHistory[entry.key];
+            if (current == null) {
+              _dailyHistory[entry.key] = entry.value;
+            } else {
+              entry.value.mergeFrom(current);
+              _dailyHistory[entry.key] = entry.value;
+            }
+          }
+        });
+      }
     } catch (error) {
       debugPrint('자세 기록 불러오기 오류: $error');
+    } finally {
+      _historyLoaded = true;
     }
   }
 
@@ -877,7 +895,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
 
   Future<void> _saveDailyHistory() async {
     final preferences = _preferences;
-    if (preferences == null) return;
+    if (preferences == null || !_historyLoaded) return;
     final cutoff = DateTime.now().subtract(const Duration(days: 90));
     _dailyHistory.removeWhere((key, _) {
       final date = DateTime.tryParse(key);
@@ -946,7 +964,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
       );
     }
     _scheduleDailyHistorySave();
-    if (mounted && _selectedTab == 2) setState(() {});
+    if (mounted && _selectedTab == 1) setState(() {});
   }
 
   Future<bool> _requestPermissions() async {
@@ -1291,7 +1309,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
       _device = null;
       _rxCharacteristic = null;
       _isConnected = false;
-      _selectedTab = 1;
+      _selectedTab = 0;
       _calibrationStatus = CalibrationStatus.checking;
       _isFirstSetup = false;
       _warningSensors = const [];
@@ -1495,9 +1513,8 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
   @override
   Widget build(BuildContext context) {
     final pageTitle = switch (_selectedTab) {
-      1 => '기기 연결',
-      2 => '자세 기록',
-      3 => '설정',
+      1 => '자세 기록',
+      2 => '설정',
       _ => 'ESP32 압력 모니터',
     };
     return Scaffold(
@@ -1529,7 +1546,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              if (_selectedTab < 2) ...[
+              if (_selectedTab == 0) ...[
                 _StatusCard(
                   connected: _isConnected,
                   connecting:
@@ -1548,12 +1565,10 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
                 ],
                 const SizedBox(height: 20),
               ],
-              if (_selectedTab == 3) ...[
+              if (_selectedTab == 2) ...[
                 Expanded(child: _buildSettingsTab(context)),
-              ] else if (_selectedTab == 2) ...[
+              ] else if (_selectedTab == 1) ...[
                 Expanded(child: _buildHistoryTab(context)),
-              ] else if (_selectedTab == 1 && _isConnected) ...[
-                Expanded(child: _buildConnectedDeviceTab(context)),
               ] else if (!_isConnected) ...[
                 Row(
                   children: [
@@ -1762,11 +1777,6 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
             label: '홈',
           ),
           NavigationDestination(
-            icon: Icon(Icons.bluetooth_outlined),
-            selectedIcon: Icon(Icons.bluetooth_connected_rounded),
-            label: '기기',
-          ),
-          NavigationDestination(
             icon: Icon(Icons.insights_outlined),
             selectedIcon: Icon(Icons.insights_rounded),
             label: '기록',
@@ -1781,49 +1791,10 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
     );
   }
 
-  Widget _buildConnectedDeviceTab(BuildContext context) => ListView(
-    children: [
-      Text(
-        '연결된 방석',
-        style: Theme.of(
-          context,
-        ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900),
-      ),
-      const SizedBox(height: 10),
-      Card(
-        child: Padding(
-          padding: const EdgeInsets.all(18),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _DeviceInfoRow(
-                label: '기기 이름',
-                value: _device?.platformName.isNotEmpty == true
-                    ? _device!.platformName
-                    : 'Seat Care ESP32',
-              ),
-              const Divider(height: 24),
-              _DeviceInfoRow(
-                label: '기기 코드',
-                value: DeviceCode.parse(_device?.platformName) ?? '확인되지 않음',
-              ),
-              const Divider(height: 24),
-              const _DeviceInfoRow(label: '데이터 수신', value: '20 Hz · 실시간'),
-            ],
-          ),
-        ),
-      ),
-      const SizedBox(height: 12),
-      const Text(
-        '다른 방석을 연결하려면 위 상태 카드의 연결 해제를 누른 뒤 QR을 다시 스캔하세요.',
-        style: TextStyle(color: Color(0xff6f7482), height: 1.45),
-      ),
-    ],
-  );
-
   Widget _buildHistoryTab(BuildContext context) {
     final record = _dailyHistory[_dateKey(_selectedHistoryDate)];
     final today = DateUtils.dateOnly(DateTime.now());
+    final isToday = DateUtils.isSameDay(_selectedHistoryDate, today);
     String duration(int seconds) {
       if (seconds < 60) return '$seconds초';
       final hours = seconds ~/ 3600;
@@ -1866,6 +1837,36 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
           ),
         ),
         const SizedBox(height: 16),
+        if (isToday) ...[
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 10),
+            decoration: BoxDecoration(
+              color: const Color(0xffe2f6ef),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: const Row(
+              children: [
+                Icon(
+                  Icons.fiber_manual_record_rounded,
+                  size: 14,
+                  color: Color(0xff00a67e),
+                ),
+                SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    '오늘 기록은 하루가 끝나기 전에도 실시간으로 반영됩니다.',
+                    style: TextStyle(
+                      color: Color(0xff08785e),
+                      fontSize: 12,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+        ],
         if (record == null || record.totalSeconds == 0) ...[
           const SizedBox(height: 80),
           const Icon(
@@ -3015,6 +3016,35 @@ class DailyPostureRecord {
       return;
     }
     pressureFrames.add(frame);
+  }
+
+  void mergeFrom(DailyPostureRecord newer) {
+    for (
+      var index = 0;
+      index < math.min(hours.length, newer.hours.length);
+      index++
+    ) {
+      final target = hours[index];
+      final source = newer.hours[index];
+      target.centered += source.centered;
+      target.left += source.left;
+      target.right += source.right;
+      target.front += source.front;
+      target.back += source.back;
+      target.away += source.away;
+      target.unavailable += source.unavailable;
+    }
+    final mergedFrames = <int, PressureTimelineFrame>{
+      for (final frame in pressureFrames) frame.secondOfDay: frame,
+      for (final frame in newer.pressureFrames) frame.secondOfDay: frame,
+    };
+    pressureFrames
+      ..clear()
+      ..addAll(
+        mergedFrames.values.toList()..sort(
+          (left, right) => left.secondOfDay.compareTo(right.secondOfDay),
+        ),
+      );
   }
 
   Map<String, dynamic> toJson() => {
@@ -4373,30 +4403,6 @@ class _ErrorNotice extends StatelessWidget {
         ),
       ],
     ),
-  );
-}
-
-class _DeviceInfoRow extends StatelessWidget {
-  const _DeviceInfoRow({required this.label, required this.value});
-
-  final String label;
-  final String value;
-
-  @override
-  Widget build(BuildContext context) => Row(
-    children: [
-      SizedBox(
-        width: 88,
-        child: Text(label, style: const TextStyle(color: Color(0xff747987))),
-      ),
-      Expanded(
-        child: Text(
-          value,
-          textAlign: TextAlign.right,
-          style: const TextStyle(fontWeight: FontWeight.w800),
-        ),
-      ),
-    ],
   );
 }
 

@@ -50,18 +50,21 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
-  testWidgets('bottom navigation opens device settings', (tester) async {
+  testWidgets('bottom navigation opens live history and settings', (
+    tester,
+  ) async {
     await tester.pumpWidget(const Esp32App(requestBluetoothOnLaunch: false));
 
     expect(find.text('홈'), findsOneWidget);
-    expect(find.text('기기'), findsOneWidget);
+    expect(find.text('기기'), findsNothing);
     expect(find.text('기록'), findsOneWidget);
     expect(find.text('설정'), findsOneWidget);
 
     await tester.tap(find.text('기록'));
     await tester.pumpAndSettle();
     expect(find.text('자세 기록'), findsOneWidget);
-    expect(find.text('이 날짜에는 기록이 없어요'), findsOneWidget);
+    expect(find.text('오늘의 자세 점수'), findsOneWidget);
+    expect(find.text('전체 기록'), findsOneWidget);
 
     await tester.tap(find.text('설정'));
     await tester.pumpAndSettle();
@@ -139,6 +142,27 @@ void main() {
     expect(restored.pressureFrames, hasLength(2));
     expect(restored.pressureFrames.first.values, [100, 200, 300, 400, 500]);
     expect(restored.pressureFrames.last.isAvailable, isFalse);
+  });
+
+  test('merges saved history with the ongoing day', () {
+    final saved = DailyPostureRecord.empty('2026-10-08')
+      ..addAssessment(const PostureAssessment(PostureLean.center, 0), 9)
+      ..addPressureFrame(
+        const PressureTimelineFrame(
+          secondOfDay: 32400,
+          values: [100, 100, 100, 100, 100],
+        ),
+      );
+    final ongoing = DailyPostureRecord.empty('2026-10-08')
+      ..addUnavailable(10)
+      ..addPressureFrame(const PressureTimelineFrame(secondOfDay: 36000));
+
+    saved.mergeFrom(ongoing);
+
+    expect(saved.totalSeconds, 2);
+    expect(saved.centered, 1);
+    expect(saved.unavailable, 1);
+    expect(saved.pressureFrames, hasLength(2));
   });
 
   testWidgets('renders readable daily posture charts', (tester) async {
