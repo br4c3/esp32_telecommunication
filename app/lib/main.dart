@@ -13,7 +13,6 @@ import 'package:permission_handler/permission_handler.dart';
 
 import 'firebase_options.dart';
 import 'firebase_web_registration.dart';
-import 'posture_notifications.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -246,13 +245,33 @@ class SignedInAccessGate extends StatefulWidget {
 }
 
 class _SignedInAccessGateState extends State<SignedInAccessGate> {
-  bool _permissionsGranted = false;
+  bool? _cameraPermissionGranted;
+
+  @override
+  void initState() {
+    super.initState();
+    _checkCameraPermission();
+  }
+
+  Future<void> _checkCameraPermission() async {
+    var granted = false;
+    try {
+      final status = await Permission.camera.status;
+      granted = status.isGranted || status.isLimited;
+    } catch (_) {
+      granted = false;
+    }
+    if (mounted) setState(() => _cameraPermissionGranted = granted);
+  }
 
   @override
   Widget build(BuildContext context) {
-    if (!_permissionsGranted) {
+    if (_cameraPermissionGranted == null) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+    if (!_cameraPermissionGranted!) {
       return DevicePermissionGate(
-        onReady: () => setState(() => _permissionsGranted = true),
+        onReady: () => setState(() => _cameraPermissionGranted = true),
       );
     }
     return const BleTerminalPage(requestBluetoothOnLaunch: false);
@@ -270,9 +289,7 @@ class DevicePermissionGate extends StatefulWidget {
 
 class _DevicePermissionGateState extends State<DevicePermissionGate> {
   bool _cameraGranted = false;
-  bool _notificationGranted = false;
   bool _requestingCamera = false;
-  bool _requestingNotification = false;
   String? _error;
 
   Future<void> _requestCamera() async {
@@ -289,35 +306,13 @@ class _DevicePermissionGateState extends State<DevicePermissionGate> {
           _error = 'QR 스캔을 사용하려면 카메라 권한을 허용해 주세요.';
         }
       });
+      if (_cameraGranted) widget.onReady();
     } catch (_) {
       if (mounted) {
         setState(() => _error = '카메라 권한을 요청하지 못했습니다. 브라우저 설정을 확인해 주세요.');
       }
     } finally {
       if (mounted) setState(() => _requestingCamera = false);
-    }
-  }
-
-  Future<void> _requestNotification() async {
-    setState(() {
-      _requestingNotification = true;
-      _error = null;
-    });
-    try {
-      final granted = await requestPostureNotificationPermission();
-      if (!mounted) return;
-      setState(() {
-        _notificationGranted = granted;
-        if (!granted) {
-          _error = '자세가 치우쳤을 때 알려드리려면 알림 권한을 허용해 주세요.';
-        }
-      });
-    } catch (_) {
-      if (mounted) {
-        setState(() => _error = '알림 권한을 요청하지 못했습니다. 브라우저 설정을 확인해 주세요.');
-      }
-    } finally {
-      if (mounted) setState(() => _requestingNotification = false);
     }
   }
 
@@ -357,7 +352,7 @@ class _DevicePermissionGateState extends State<DevicePermissionGate> {
                     ),
                     const SizedBox(height: 8),
                     const Text(
-                      'QR 인식과 자세 알림에 필요한 권한을 먼저 허용해 주세요.',
+                      '방석 QR 인식에 필요한 카메라 권한을 먼저 허용해 주세요.',
                       textAlign: TextAlign.center,
                       style: TextStyle(color: Color(0xff6f7482)),
                     ),
@@ -375,25 +370,6 @@ class _DevicePermissionGateState extends State<DevicePermissionGate> {
                           ? null
                           : _requestCamera,
                     ),
-                    const SizedBox(height: 12),
-                    _AccessStep(
-                      number: 2,
-                      icon: Icons.notifications_active_outlined,
-                      title: '알림 권한',
-                      description: _notificationGranted
-                          ? '허용 완료'
-                          : _cameraGranted
-                          ? '정자세에서 벗어나면 자세 교정 알림을 보냅니다.'
-                          : '카메라 권한을 먼저 허용해 주세요.',
-                      complete: _notificationGranted,
-                      buttonLabel: _requestingNotification ? '요청 중…' : '알림 허용',
-                      onPressed:
-                          !_cameraGranted ||
-                              _requestingNotification ||
-                              _notificationGranted
-                          ? null
-                          : _requestNotification,
-                    ),
                     if (_error != null) ...[
                       const SizedBox(height: 14),
                       _ErrorNotice(
@@ -402,19 +378,8 @@ class _DevicePermissionGateState extends State<DevicePermissionGate> {
                       ),
                     ],
                     const SizedBox(height: 16),
-                    SizedBox(
-                      height: 50,
-                      child: FilledButton.icon(
-                        onPressed: _cameraGranted && _notificationGranted
-                            ? widget.onReady
-                            : null,
-                        icon: const Icon(Icons.qr_code_scanner_rounded),
-                        label: const Text('권한 설정 완료 · QR 스캔으로 이동'),
-                      ),
-                    ),
-                    const SizedBox(height: 12),
                     const Text(
-                      'Bluetooth 연결은 다음 화면에서 방석 QR을 스캔한 뒤 진행합니다.',
+                      '카메라를 허용하면 QR 연결 화면으로 바로 이동합니다. 자세 알림은 연결 후 앱 화면의 팝업으로 표시됩니다.',
                       textAlign: TextAlign.center,
                       style: TextStyle(fontSize: 11, color: Color(0xff7a7f8d)),
                     ),
@@ -809,6 +774,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
   DateTime? _leanStartedAt;
   DateTime? _lastPostureNotificationAt;
   String? _postureWarning;
+  bool _posturePopupOpen = false;
   List<double> _pressures = List<double>.filled(5, 0);
 
   @override
@@ -1221,7 +1187,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
         warning = assessment.message;
         if (cooledDown) {
           _lastPostureNotificationAt = now;
-          showPostureNotification(assessment.message);
+          unawaited(_showPosturePopup(assessment.message));
         }
       }
     }
@@ -1232,6 +1198,16 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
         _postureWarning = warning;
       });
     }
+  }
+
+  Future<void> _showPosturePopup(String message) async {
+    if (!mounted || _posturePopupOpen) return;
+    _posturePopupOpen = true;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => PostureAlertDialog(message: message),
+    );
+    _posturePopupOpen = false;
   }
 
   Future<void> _requestCalibrationStatus() async {
@@ -1662,6 +1638,30 @@ class _PostureWarning extends StatelessWidget {
         ),
       ],
     ),
+  );
+}
+
+class PostureAlertDialog extends StatelessWidget {
+  const PostureAlertDialog({super.key, required this.message});
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    icon: const Icon(
+      Icons.accessibility_new_rounded,
+      size: 42,
+      color: Color(0xffd39e00),
+    ),
+    title: const Text('자세를 바로잡아 주세요'),
+    content: Text(message, textAlign: TextAlign.center),
+    actionsAlignment: MainAxisAlignment.center,
+    actions: [
+      FilledButton(
+        onPressed: () => Navigator.of(context).pop(),
+        child: const Text('확인'),
+      ),
+    ],
   );
 }
 

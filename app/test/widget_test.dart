@@ -26,11 +26,13 @@ void main() {
 
     expect(find.text('Seat Care 사용 권한'), findsOneWidget);
     expect(find.text('카메라 권한'), findsOneWidget);
-    expect(find.text('알림 권한'), findsOneWidget);
+    expect(find.text('알림 권한'), findsNothing);
     expect(find.text('Bluetooth 권한'), findsNothing);
     expect(find.text('카메라 허용'), findsOneWidget);
-    expect(find.text('알림 허용'), findsOneWidget);
-    expect(find.text('권한 설정 완료 · QR 스캔으로 이동'), findsOneWidget);
+    expect(
+      find.text('카메라를 허용하면 QR 연결 화면으로 바로 이동합니다. 자세 알림은 연결 후 앱 화면의 팝업으로 표시됩니다.'),
+      findsOneWidget,
+    );
   });
 
   testWidgets('shows disconnected terminal screen', (tester) async {
@@ -76,6 +78,20 @@ void main() {
       PostureLean.back,
     );
     expect(PostureAnalyzer.assess([5, 5, 5, 5, 5]).lean, PostureLean.notSeated);
+  });
+
+  testWidgets('posture alert is shown as an in-app popup', (tester) async {
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(
+          body: PostureAlertDialog(message: '왼쪽으로 치우쳐 있어요. 몸을 방석 중앙으로 옮겨 주세요.'),
+        ),
+      ),
+    );
+
+    expect(find.text('자세를 바로잡아 주세요'), findsOneWidget);
+    expect(find.textContaining('왼쪽으로 치우쳐'), findsOneWidget);
+    expect(find.text('확인'), findsOneWidget);
   });
 
   test('normalizes ESP32 barcode device codes', () {
