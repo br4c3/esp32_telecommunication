@@ -12,13 +12,59 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import 'firebase_options.dart';
+import 'firebase_web_registration.dart';
 
-Future<void> main() async {
+void main() {
   WidgetsFlutterBinding.ensureInitialized();
   if (kIsWeb) {
-    await Firebase.initializeApp(options: DefaultFirebaseOptions.web);
+    registerFirebaseWebPlugins();
+    runApp(const FirebaseBootstrap());
+    return;
   }
   runApp(const Esp32App());
+}
+
+class FirebaseBootstrap extends StatefulWidget {
+  const FirebaseBootstrap({super.key});
+
+  @override
+  State<FirebaseBootstrap> createState() => _FirebaseBootstrapState();
+}
+
+class _FirebaseBootstrapState extends State<FirebaseBootstrap> {
+  late final Future<FirebaseApp> _initialization = Firebase.initializeApp(
+    options: DefaultFirebaseOptions.web,
+  );
+
+  @override
+  Widget build(BuildContext context) => FutureBuilder<FirebaseApp>(
+    future: _initialization,
+    builder: (context, snapshot) {
+      if (snapshot.hasError) {
+        return MaterialApp(
+          debugShowCheckedModeBanner: false,
+          home: Scaffold(
+            body: Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Text(
+                  'Firebase 연결에 실패했습니다.\n${snapshot.error}',
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            ),
+          ),
+        );
+      }
+      if (snapshot.connectionState != ConnectionState.done) {
+        return const MaterialApp(
+          debugShowCheckedModeBanner: false,
+          home: Scaffold(body: Center(child: CircularProgressIndicator())),
+        );
+      }
+      return const Esp32App();
+    },
+  );
 }
 
 enum CalibrationStatus {
