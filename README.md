@@ -68,3 +68,6 @@ enable it under **System Settings → Privacy & Security → Bluetooth**.
 The app uses the nonprofit/personal-use option of the `flutter_blue_plus`
 license. Review that package's license before distributing this app for a
 commercial purpose.
+
+기본자세
+- 시나리오 5개
