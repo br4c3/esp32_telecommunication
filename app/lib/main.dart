@@ -775,6 +775,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
   DateTime? _lastPostureNotificationAt;
   String? _postureWarning;
   bool _posturePopupOpen = false;
+  int _selectedTab = 0;
   List<double> _pressures = List<double>.filled(5, 0);
 
   @override
@@ -1127,6 +1128,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
           _isConnected = true;
           _connectionStage = null;
           _calibrationStatus = CalibrationStatus.checking;
+          _selectedTab = 0;
         });
       }
       await _requestCalibrationStatus();
@@ -1150,6 +1152,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
       _device = null;
       _rxCharacteristic = null;
       _isConnected = false;
+      _selectedTab = 1;
       _calibrationStatus = CalibrationStatus.checking;
       _isFirstSetup = false;
       _warningSensors = const [];
@@ -1344,13 +1347,18 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
 
   @override
   Widget build(BuildContext context) {
+    final pageTitle = switch (_selectedTab) {
+      1 => '기기 연결',
+      2 => '설정',
+      _ => 'ESP32 압력 모니터',
+    };
     return Scaffold(
       appBar: AppBar(
         toolbarHeight: 72,
-        title: const Column(
+        title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
+            const Text(
               'PRESSURE LINK',
               style: TextStyle(
                 fontSize: 11,
@@ -1359,37 +1367,13 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
                 color: AppColors.corporateYellow,
               ),
             ),
-            SizedBox(height: 2),
+            const SizedBox(height: 2),
             Text(
-              'ESP32 압력 모니터',
-              style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800),
+              pageTitle,
+              style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800),
             ),
           ],
         ),
-        actions: [
-          if (_isConnected && _calibrationStatus == CalibrationStatus.ready)
-            IconButton(
-              onPressed: () => setState(() {
-                _isFirstSetup = false;
-                _calibrationStatus = CalibrationStatus.zeroRequired;
-              }),
-              tooltip: '영점 다시 맞추기',
-              icon: const Icon(Icons.tune_rounded),
-            ),
-          if (_isConnected)
-            IconButton.filledTonal(
-              onPressed: _disconnect,
-              tooltip: '연결 해제',
-              icon: const Icon(Icons.link_off_rounded),
-            ),
-          if (kIsWeb)
-            IconButton(
-              onPressed: () => FirebaseAuth.instance.signOut(),
-              tooltip: '로그아웃',
-              icon: const Icon(Icons.logout_rounded),
-            ),
-          const SizedBox(width: 12),
-        ],
       ),
       body: SafeArea(
         child: Padding(
@@ -1403,6 +1387,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
                     _isConnecting || (_isScanning && _connectionStage != null),
                 deviceName: _device?.platformName,
                 connectionStage: _connectionStage,
+                onDisconnect: _isConnected ? _disconnect : null,
               ),
               if (_error != null) ...[
                 const SizedBox(height: 12),
@@ -1412,7 +1397,11 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
                 ),
               ],
               const SizedBox(height: 20),
-              if (!_isConnected) ...[
+              if (_selectedTab == 2) ...[
+                Expanded(child: _buildSettingsTab(context)),
+              ] else if (_selectedTab == 1 && _isConnected) ...[
+                Expanded(child: _buildConnectedDeviceTab(context)),
+              ] else if (!_isConnected) ...[
                 Row(
                   children: [
                     Expanded(
@@ -1606,8 +1595,111 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
           ),
         ),
       ),
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: _selectedTab,
+        onDestinationSelected: (index) => setState(() => _selectedTab = index),
+        destinations: const [
+          NavigationDestination(
+            icon: Icon(Icons.home_outlined),
+            selectedIcon: Icon(Icons.home_rounded),
+            label: '홈',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.bluetooth_outlined),
+            selectedIcon: Icon(Icons.bluetooth_connected_rounded),
+            label: '기기',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.settings_outlined),
+            selectedIcon: Icon(Icons.settings_rounded),
+            label: '설정',
+          ),
+        ],
+      ),
     );
   }
+
+  Widget _buildConnectedDeviceTab(BuildContext context) => ListView(
+    children: [
+      Text(
+        '연결된 방석',
+        style: Theme.of(
+          context,
+        ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900),
+      ),
+      const SizedBox(height: 10),
+      Card(
+        child: Padding(
+          padding: const EdgeInsets.all(18),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _DeviceInfoRow(
+                label: '기기 이름',
+                value: _device?.platformName.isNotEmpty == true
+                    ? _device!.platformName
+                    : 'Seat Care ESP32',
+              ),
+              const Divider(height: 24),
+              _DeviceInfoRow(
+                label: '기기 코드',
+                value: DeviceCode.parse(_device?.platformName) ?? '확인되지 않음',
+              ),
+              const Divider(height: 24),
+              const _DeviceInfoRow(label: '데이터 수신', value: '20 Hz · 실시간'),
+            ],
+          ),
+        ),
+      ),
+      const SizedBox(height: 12),
+      const Text(
+        '다른 방석을 연결하려면 위 상태 카드의 연결 해제를 누른 뒤 QR을 다시 스캔하세요.',
+        style: TextStyle(color: Color(0xff6f7482), height: 1.45),
+      ),
+    ],
+  );
+
+  Widget _buildSettingsTab(BuildContext context) => ListView(
+    children: [
+      _SettingsTile(
+        icon: Icons.tune_rounded,
+        title: '정자세 다시 보정',
+        description: _isConnected
+            ? '영점과 정자세 기준을 처음부터 다시 측정합니다.'
+            : '방석을 연결한 뒤 사용할 수 있습니다.',
+        enabled: _isConnected,
+        onTap: () => setState(() {
+          _isFirstSetup = false;
+          _calibrationStatus = CalibrationStatus.zeroRequired;
+          _selectedTab = 0;
+        }),
+      ),
+      const SizedBox(height: 10),
+      _SettingsTile(
+        icon: Icons.science_outlined,
+        title: '압력 화면 테스트',
+        description: 'ESP32 없이 압력 분포와 보정 화면을 확인합니다.',
+        onTap: () => Navigator.of(
+          context,
+        ).push(MaterialPageRoute(builder: (_) => const PressureDemoPage())),
+      ),
+      const SizedBox(height: 10),
+      const _SettingsTile(
+        icon: Icons.security_rounded,
+        title: '권한 안내',
+        description: '카메라는 QR 인식에만 사용하며 Bluetooth는 연결할 때 선택합니다.',
+      ),
+      if (kIsWeb) ...[
+        const SizedBox(height: 10),
+        _SettingsTile(
+          icon: Icons.logout_rounded,
+          title: '로그아웃',
+          description: '현재 Seat Care 계정에서 로그아웃합니다.',
+          onTap: () => FirebaseAuth.instance.signOut(),
+        ),
+      ],
+    ],
+  );
 }
 
 class _PostureWarning extends StatelessWidget {
@@ -2847,11 +2939,13 @@ class _StatusCard extends StatelessWidget {
     required this.connecting,
     this.deviceName,
     this.connectionStage,
+    this.onDisconnect,
   });
   final bool connected;
   final bool connecting;
   final String? deviceName;
   final String? connectionStage;
+  final VoidCallback? onDisconnect;
 
   @override
   Widget build(BuildContext context) {
@@ -2914,11 +3008,18 @@ class _StatusCard extends StatelessWidget {
                 ],
               ),
             ),
-            Container(
-              width: 9,
-              height: 9,
-              decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-            ),
+            if (onDisconnect != null)
+              OutlinedButton.icon(
+                onPressed: onDisconnect,
+                icon: const Icon(Icons.link_off_rounded, size: 18),
+                label: const Text('연결 해제'),
+              )
+            else
+              Container(
+                width: 9,
+                height: 9,
+                decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+              ),
           ],
         ),
       ),
@@ -2958,6 +3059,60 @@ class _ErrorNotice extends StatelessWidget {
           icon: const Icon(Icons.close_rounded, size: 20),
         ),
       ],
+    ),
+  );
+}
+
+class _DeviceInfoRow extends StatelessWidget {
+  const _DeviceInfoRow({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    children: [
+      SizedBox(
+        width: 88,
+        child: Text(label, style: const TextStyle(color: Color(0xff747987))),
+      ),
+      Expanded(
+        child: Text(
+          value,
+          textAlign: TextAlign.right,
+          style: const TextStyle(fontWeight: FontWeight.w800),
+        ),
+      ),
+    ],
+  );
+}
+
+class _SettingsTile extends StatelessWidget {
+  const _SettingsTile({
+    required this.icon,
+    required this.title,
+    required this.description,
+    this.enabled = true,
+    this.onTap,
+  });
+
+  final IconData icon;
+  final String title;
+  final String description;
+  final bool enabled;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) => Card(
+    child: ListTile(
+      enabled: enabled,
+      onTap: enabled ? onTap : null,
+      leading: Icon(icon),
+      title: Text(title, style: const TextStyle(fontWeight: FontWeight.w800)),
+      subtitle: Text(description),
+      trailing: onTap == null || !enabled
+          ? null
+          : const Icon(Icons.chevron_right_rounded),
     ),
   );
 }
@@ -3156,37 +3311,40 @@ class _EmptyDevices extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Center(
-    child: Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Container(
-          width: 88,
-          height: 88,
-          decoration: BoxDecoration(
-            color: const Color(0xffd3d3cd),
-            borderRadius: BorderRadius.circular(2),
+    child: SingleChildScrollView(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 88,
+            height: 88,
+            decoration: BoxDecoration(
+              color: const Color(0xffd3d3cd),
+              borderRadius: BorderRadius.circular(2),
+            ),
+            child: Icon(
+              scanning ? Icons.radar_rounded : Icons.sensors_rounded,
+              size: 42,
+              color: const Color(0xff303436),
+            ),
           ),
-          child: Icon(
-            scanning ? Icons.radar_rounded : Icons.sensors_rounded,
-            size: 42,
-            color: const Color(0xff303436),
+          const SizedBox(height: 18),
+          Text(
+            scanning ? 'ESP32를 찾고 있어요' : '아직 검색된 기기가 없어요',
+            style: Theme.of(
+              context,
+            ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
           ),
-        ),
-        const SizedBox(height: 18),
-        Text(
-          scanning ? 'ESP32를 찾고 있어요' : '아직 검색된 기기가 없어요',
-          style: Theme.of(
-            context,
-          ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
-        ),
-        const SizedBox(height: 6),
-        Text(
-          scanning ? '가까운 기기를 검색하는 중입니다' : '위의 검색 버튼을 눌러 시작하세요',
-          style: Theme.of(
-            context,
-          ).textTheme.bodyMedium?.copyWith(color: const Color(0xff7a7f8d)),
-        ),
-      ],
+          const SizedBox(height: 6),
+          Text(
+            scanning ? '가까운 기기를 검색하는 중입니다' : '위의 검색 버튼을 눌러 시작하세요',
+            style: Theme.of(
+              context,
+            ).textTheme.bodyMedium?.copyWith(color: const Color(0xff7a7f8d)),
+          ),
+        ],
+      ),
     ),
   );
 }

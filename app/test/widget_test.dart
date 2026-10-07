@@ -49,6 +49,19 @@ void main() {
     expect(find.text('코드 적용'), findsOneWidget);
   });
 
+  testWidgets('bottom navigation opens device settings', (tester) async {
+    await tester.pumpWidget(const Esp32App(requestBluetoothOnLaunch: false));
+
+    expect(find.text('홈'), findsOneWidget);
+    expect(find.text('기기'), findsOneWidget);
+    expect(find.text('설정'), findsOneWidget);
+
+    await tester.tap(find.text('설정'));
+    await tester.pumpAndSettle();
+    expect(find.text('정자세 다시 보정'), findsOneWidget);
+    expect(find.text('권한 안내'), findsOneWidget);
+  });
+
   test('parses a five-sensor pressure packet', () {
     final frame = PressureFrame.tryParse('P:0,12,345,678,999');
     expect(frame?.values, [0, 12, 345, 678, 999]);
