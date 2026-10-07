@@ -13,6 +13,7 @@ import 'package:permission_handler/permission_handler.dart';
 
 import 'firebase_options.dart';
 import 'firebase_web_registration.dart';
+import 'posture_notifications.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -275,7 +276,9 @@ class _DevicePermissionGateState extends State<DevicePermissionGate> {
   static final Guid _serviceId = Guid('6E400001-B5A3-F393-E0A9-E50E24DCCA9E');
 
   bool _cameraGranted = false;
+  bool _notificationGranted = false;
   bool _requestingCamera = false;
+  bool _requestingNotification = false;
   bool _requestingBluetooth = false;
   String? _error;
 
@@ -337,6 +340,29 @@ class _DevicePermissionGateState extends State<DevicePermissionGate> {
     }
   }
 
+  Future<void> _requestNotification() async {
+    setState(() {
+      _requestingNotification = true;
+      _error = null;
+    });
+    try {
+      final granted = await requestPostureNotificationPermission();
+      if (!mounted) return;
+      setState(() {
+        _notificationGranted = granted;
+        if (!granted) {
+          _error = '자세가 치우쳤을 때 알려드리려면 알림 권한을 허용해 주세요.';
+        }
+      });
+    } catch (_) {
+      if (mounted) {
+        setState(() => _error = '알림 권한을 요청하지 못했습니다. 브라우저 설정을 확인해 주세요.');
+      }
+    } finally {
+      if (mounted) setState(() => _requestingNotification = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(
@@ -373,7 +399,7 @@ class _DevicePermissionGateState extends State<DevicePermissionGate> {
                     ),
                     const SizedBox(height: 8),
                     const Text(
-                      'QR 인식과 방석 연결에 필요한 권한을 먼저 허용해 주세요.',
+                      'QR 인식, 자세 알림, 방석 연결에 필요한 권한을 먼저 허용해 주세요.',
                       textAlign: TextAlign.center,
                       style: TextStyle(color: Color(0xff6f7482)),
                     ),
@@ -394,16 +420,35 @@ class _DevicePermissionGateState extends State<DevicePermissionGate> {
                     const SizedBox(height: 12),
                     _AccessStep(
                       number: 2,
+                      icon: Icons.notifications_active_outlined,
+                      title: '알림 권한',
+                      description: _notificationGranted
+                          ? '허용 완료'
+                          : _cameraGranted
+                          ? '정자세에서 벗어나면 자세 교정 알림을 보냅니다.'
+                          : '카메라 권한을 먼저 허용해 주세요.',
+                      complete: _notificationGranted,
+                      buttonLabel: _requestingNotification ? '요청 중…' : '알림 허용',
+                      onPressed:
+                          !_cameraGranted ||
+                              _requestingNotification ||
+                              _notificationGranted
+                          ? null
+                          : _requestNotification,
+                    ),
+                    const SizedBox(height: 12),
+                    _AccessStep(
+                      number: 3,
                       icon: Icons.bluetooth_rounded,
                       title: 'Bluetooth 권한',
-                      description: _cameraGranted
+                      description: _notificationGranted
                           ? '브라우저 목록에서 Seat Care ESP32를 선택하세요.'
-                          : '카메라 권한을 먼저 허용해 주세요.',
+                          : '알림 권한을 먼저 허용해 주세요.',
                       complete: false,
                       buttonLabel: _requestingBluetooth
                           ? '기기 선택 중…'
                           : 'ESP32 선택 및 연결',
-                      onPressed: !_cameraGranted || _requestingBluetooth
+                      onPressed: !_notificationGranted || _requestingBluetooth
                           ? null
                           : _requestBluetooth,
                     ),
@@ -416,7 +461,7 @@ class _DevicePermissionGateState extends State<DevicePermissionGate> {
                     ],
                     const SizedBox(height: 16),
                     const Text(
-                      '권한은 QR 인식과 ESP32 통신에만 사용됩니다. 웹 Bluetooth는 기기를 선택해야 권한이 부여됩니다.',
+                      '권한은 QR 인식, 자세 교정 알림, ESP32 통신에만 사용됩니다. 웹 Bluetooth는 기기를 선택해야 권한이 부여됩니다.',
                       textAlign: TextAlign.center,
                       style: TextStyle(fontSize: 11, color: Color(0xff7a7f8d)),
                     ),
@@ -812,6 +857,10 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
   List<int> _warningSensors = const [];
   String? _pendingDeviceCode;
   String? _error;
+  PostureLean? _leanCandidate;
+  DateTime? _leanStartedAt;
+  DateTime? _lastPostureNotificationAt;
+  String? _postureWarning;
   List<double> _pressures = List<double>.filled(5, 0);
 
   @override
@@ -1149,7 +1198,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
           return;
         }
         final frame = PressureFrame.tryParse(text);
-        if (frame != null) setState(() => _pressures = frame.values);
+        if (frame != null) _handlePressureFrame(frame);
       });
       await tx.setNotifyValue(true);
       if (mounted) {
@@ -1183,8 +1232,51 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
       _calibrationStatus = CalibrationStatus.checking;
       _isFirstSetup = false;
       _warningSensors = const [];
+      _leanCandidate = null;
+      _leanStartedAt = null;
+      _postureWarning = null;
       _pressures = List<double>.filled(5, 0);
     });
+  }
+
+  void _handlePressureFrame(PressureFrame frame) {
+    final assessment = PostureAnalyzer.assess(frame.values);
+    final now = DateTime.now();
+    var warning = _postureWarning;
+
+    if (_calibrationStatus != CalibrationStatus.ready ||
+        assessment.lean == PostureLean.center ||
+        assessment.lean == PostureLean.notSeated) {
+      _leanCandidate = null;
+      _leanStartedAt = null;
+      if (assessment.lean == PostureLean.center) warning = null;
+    } else if (_leanCandidate != assessment.lean) {
+      _leanCandidate = assessment.lean;
+      _leanStartedAt = now;
+    } else {
+      final startedAt = _leanStartedAt;
+      final lastNotification = _lastPostureNotificationAt;
+      final sustained =
+          startedAt != null &&
+          now.difference(startedAt) >= const Duration(seconds: 3);
+      final cooledDown =
+          lastNotification == null ||
+          now.difference(lastNotification) >= const Duration(minutes: 1);
+      if (sustained) {
+        warning = assessment.message;
+        if (cooledDown) {
+          _lastPostureNotificationAt = now;
+          showPostureNotification(assessment.message);
+        }
+      }
+    }
+
+    if (mounted) {
+      setState(() {
+        _pressures = frame.values;
+        _postureWarning = warning;
+      });
+    }
   }
 
   Future<void> _requestCalibrationStatus() async {
@@ -1529,6 +1621,10 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
                   ),
                 ),
               ] else ...[
+                if (_postureWarning != null) ...[
+                  _PostureWarning(message: _postureWarning!),
+                  const SizedBox(height: 12),
+                ],
                 _PressureSummary(values: _pressures),
                 const SizedBox(height: 14),
                 Row(
@@ -1558,6 +1654,37 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
       ),
     );
   }
+}
+
+class _PostureWarning extends StatelessWidget {
+  const _PostureWarning({required this.message});
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.all(14),
+    decoration: BoxDecoration(
+      color: const Color(0xfffff3cd),
+      border: Border.all(color: const Color(0xffd39e00)),
+      borderRadius: BorderRadius.circular(8),
+    ),
+    child: Row(
+      children: [
+        const Icon(Icons.accessibility_new_rounded, color: Color(0xff8a6500)),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Text(
+            message,
+            style: const TextStyle(
+              color: Color(0xff644c00),
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
 }
 
 class CalibrationPanel extends StatelessWidget {
@@ -2253,6 +2380,67 @@ class _ScannerOverlayPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
+enum PostureLean { notSeated, center, left, right, front, back }
+
+class PostureAssessment {
+  const PostureAssessment(this.lean, this.score);
+
+  final PostureLean lean;
+  final double score;
+
+  String get message => switch (lean) {
+    PostureLean.left => '왼쪽으로 치우쳐 있어요. 몸을 방석 중앙으로 옮겨 주세요.',
+    PostureLean.right => '오른쪽으로 치우쳐 있어요. 몸을 방석 중앙으로 옮겨 주세요.',
+    PostureLean.front => '앞쪽으로 치우쳐 있어요. 엉덩이를 뒤로 옮겨 주세요.',
+    PostureLean.back => '뒤쪽으로 치우쳐 있어요. 상체를 정자세로 세워 주세요.',
+    PostureLean.center => '정자세를 잘 유지하고 있어요.',
+    PostureLean.notSeated => '착석 압력이 감지되지 않았습니다.',
+  };
+}
+
+abstract final class PostureAnalyzer {
+  static PostureAssessment assess(
+    List<double> values, {
+    double minimumTotalPressure = 125,
+    double leanThreshold = .20,
+  }) {
+    if (values.length != 5) {
+      return const PostureAssessment(PostureLean.notSeated, 0);
+    }
+    final total = values.fold<double>(
+      0,
+      (sum, value) => sum + math.max(0, value),
+    );
+    if (total < minimumTotalPressure) {
+      return const PostureAssessment(PostureLean.notSeated, 0);
+    }
+
+    // Sensor order: L1, R1, L2, R2, C1. Balance calibration normalizes
+    // their reference response, so comparing side averages is relative to the
+    // user's saved upright posture rather than raw sensor sensitivity.
+    final left = (values[0] + values[2]) / 2;
+    final right = (values[1] + values[3]) / 2;
+    final front = (values[0] + values[1]) / 2;
+    final back = (values[2] + values[3] + values[4]) / 3;
+    final lateral = (right - left) / math.max(1, right + left);
+    final longitudinal = (front - back) / math.max(1, front + back);
+
+    if (lateral.abs() < leanThreshold && longitudinal.abs() < leanThreshold) {
+      return const PostureAssessment(PostureLean.center, 0);
+    }
+    if (lateral.abs() >= longitudinal.abs()) {
+      return PostureAssessment(
+        lateral > 0 ? PostureLean.right : PostureLean.left,
+        lateral.abs(),
+      );
+    }
+    return PostureAssessment(
+      longitudinal > 0 ? PostureLean.front : PostureLean.back,
+      longitudinal.abs(),
+    );
+  }
 }
 
 class PressureFrame {

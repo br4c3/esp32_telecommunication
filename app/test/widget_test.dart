@@ -26,8 +26,10 @@ void main() {
 
     expect(find.text('Seat Care 사용 권한'), findsOneWidget);
     expect(find.text('카메라 권한'), findsOneWidget);
+    expect(find.text('알림 권한'), findsOneWidget);
     expect(find.text('Bluetooth 권한'), findsOneWidget);
     expect(find.text('카메라 허용'), findsOneWidget);
+    expect(find.text('알림 허용'), findsOneWidget);
     expect(find.text('ESP32 선택 및 연결'), findsOneWidget);
   });
 
@@ -45,6 +47,30 @@ void main() {
     expect(frame?.values, [0, 12, 345, 678, 999]);
     expect(PressureFrame.tryParse('P:1,2,3'), isNull);
     expect(PressureFrame.tryParse('hello'), isNull);
+  });
+
+  test('detects sustained posture direction from calibrated pressure', () {
+    expect(
+      PostureAnalyzer.assess([100, 100, 100, 100, 100]).lean,
+      PostureLean.center,
+    );
+    expect(
+      PostureAnalyzer.assess([220, 80, 220, 80, 100]).lean,
+      PostureLean.left,
+    );
+    expect(
+      PostureAnalyzer.assess([80, 220, 80, 220, 100]).lean,
+      PostureLean.right,
+    );
+    expect(
+      PostureAnalyzer.assess([220, 220, 70, 70, 70]).lean,
+      PostureLean.front,
+    );
+    expect(
+      PostureAnalyzer.assess([70, 70, 200, 200, 200]).lean,
+      PostureLean.back,
+    );
+    expect(PostureAnalyzer.assess([5, 5, 5, 5, 5]).lean, PostureLean.notSeated);
   });
 
   test('normalizes ESP32 barcode device codes', () {
