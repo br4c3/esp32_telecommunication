@@ -12,10 +12,17 @@ void main() {
     expect(find.byType(SeatCareCushionIcon), findsOneWidget);
     expect(find.text('Google로 계속하기'), findsOneWidget);
     expect(find.text('Apple로 계속하기'), findsOneWidget);
+    expect(find.text('기기 권한 확인'), findsOneWidget);
     expect(
       find.image(const AssetImage('assets/images/google_g.png')),
       findsOneWidget,
     );
+
+    await tester.tap(find.text('기기 권한 확인'));
+    await tester.pumpAndSettle();
+    expect(find.text('현재 권한 확인'), findsOneWidget);
+    expect(find.text('카메라'), findsOneWidget);
+    expect(find.text('Bluetooth'), findsOneWidget);
   });
 
   testWidgets('shows disconnected terminal screen', (tester) async {

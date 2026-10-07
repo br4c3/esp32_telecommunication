@@ -241,6 +241,9 @@ class LoginPage extends StatefulWidget {
 
 class _LoginPageState extends State<LoginPage> {
   bool _submitting = false;
+  bool _checkingPermissions = false;
+  String _cameraPermission = 'QR 스캔 시 요청';
+  String _bluetoothPermission = '기기 연결 시 요청';
   String? _message;
 
   String _authMessage(Object error) {
@@ -285,6 +288,51 @@ class _LoginPageState extends State<LoginPage> {
     await _signIn(provider);
   }
 
+  Future<void> _checkDevicePermissions() async {
+    setState(() => _checkingPermissions = true);
+
+    var cameraMessage = 'QR 화면에서 권한을 요청합니다';
+    var bluetoothMessage = '연결 화면에서 권한을 요청합니다';
+    try {
+      final cameraStatus = await Permission.camera.status;
+      cameraMessage = switch (cameraStatus) {
+        PermissionStatus.granted || PermissionStatus.limited => '허용됨',
+        PermissionStatus.permanentlyDenied ||
+        PermissionStatus.restricted => '브라우저 또는 시스템 설정에서 허용 필요',
+        _ => '아직 허용되지 않음 · QR 스캔 시 요청',
+      };
+    } catch (_) {
+      cameraMessage = 'QR 스캔 시 브라우저에서 확인';
+    }
+
+    try {
+      if (kIsWeb) {
+        final supported = await FlutterBluePlus.isSupported;
+        bluetoothMessage = supported
+            ? '사용 가능 · 연결 버튼을 누르면 요청'
+            : '이 브라우저에서는 지원되지 않음';
+      } else if (Platform.isAndroid) {
+        final scan = await Permission.bluetoothScan.status;
+        final connect = await Permission.bluetoothConnect.status;
+        bluetoothMessage = scan.isGranted && connect.isGranted
+            ? '허용됨'
+            : '아직 허용되지 않음 · 기기 연결 시 요청';
+      } else {
+        final status = await Permission.bluetooth.status;
+        bluetoothMessage = status.isGranted ? '허용됨' : '아직 허용되지 않음 · 기기 연결 시 요청';
+      }
+    } catch (_) {
+      bluetoothMessage = '기기 연결 시 브라우저에서 확인';
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _cameraPermission = cameraMessage;
+      _bluetoothPermission = bluetoothMessage;
+      _checkingPermissions = false;
+    });
+  }
+
   @override
   Widget build(BuildContext context) => Scaffold(
     body: SafeArea(
@@ -314,7 +362,83 @@ class _LoginPageState extends State<LoginPage> {
                       textAlign: TextAlign.center,
                       style: TextStyle(color: Color(0xff6f7482)),
                     ),
-                    const SizedBox(height: 26),
+                    const SizedBox(height: 18),
+                    Container(
+                      decoration: BoxDecoration(
+                        color: const Color(0xfff7f7f3),
+                        border: Border.all(color: const Color(0xffd5d5ce)),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      clipBehavior: Clip.antiAlias,
+                      child: ExpansionTile(
+                        tilePadding: const EdgeInsets.symmetric(horizontal: 14),
+                        childrenPadding: const EdgeInsets.fromLTRB(
+                          14,
+                          0,
+                          14,
+                          14,
+                        ),
+                        leading: const Icon(
+                          Icons.verified_user_outlined,
+                          size: 21,
+                          color: AppColors.ink,
+                        ),
+                        title: const Text(
+                          '기기 권한 확인',
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                        subtitle: const Text(
+                          '카메라 · Bluetooth',
+                          style: TextStyle(fontSize: 11),
+                        ),
+                        children: [
+                          _PermissionStatusRow(
+                            icon: Icons.qr_code_scanner_rounded,
+                            title: '카메라',
+                            description: _cameraPermission,
+                          ),
+                          const SizedBox(height: 10),
+                          _PermissionStatusRow(
+                            icon: Icons.bluetooth_rounded,
+                            title: 'Bluetooth',
+                            description: _bluetoothPermission,
+                          ),
+                          const SizedBox(height: 12),
+                          SizedBox(
+                            width: double.infinity,
+                            child: OutlinedButton.icon(
+                              onPressed: _checkingPermissions
+                                  ? null
+                                  : _checkDevicePermissions,
+                              icon: _checkingPermissions
+                                  ? const SizedBox.square(
+                                      dimension: 16,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
+                                    )
+                                  : const Icon(Icons.refresh_rounded, size: 18),
+                              label: Text(
+                                _checkingPermissions ? '확인 중…' : '현재 권한 확인',
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          const Text(
+                            '권한은 로그인 후 해당 기능을 사용할 때만 요청하며, Bluetooth 선택창은 연결 버튼을 직접 눌러야 열립니다.',
+                            style: TextStyle(
+                              fontSize: 11,
+                              height: 1.45,
+                              color: Color(0xff6f7482),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 18),
                     SizedBox(
                       height: 50,
                       child: OutlinedButton(
@@ -401,6 +525,47 @@ class _LoginPageState extends State<LoginPage> {
         ),
       ),
     ),
+  );
+}
+
+class _PermissionStatusRow extends StatelessWidget {
+  const _PermissionStatusRow({
+    required this.icon,
+    required this.title,
+    required this.description,
+  });
+
+  final IconData icon;
+  final String title;
+  final String description;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Icon(icon, size: 19, color: AppColors.ink),
+      const SizedBox(width: 10),
+      Expanded(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              title,
+              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w800),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              description,
+              style: const TextStyle(
+                fontSize: 11,
+                height: 1.35,
+                color: Color(0xff6f7482),
+              ),
+            ),
+          ],
+        ),
+      ),
+    ],
   );
 }
 
