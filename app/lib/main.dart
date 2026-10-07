@@ -776,6 +776,8 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
   String? _postureWarning;
   bool _posturePopupOpen = false;
   int _selectedTab = 0;
+  final List<PostureHistorySample> _postureHistory = [];
+  DateTime? _lastHistorySampleAt;
   List<double> _pressures = List<double>.filled(5, 0);
 
   @override
@@ -992,6 +994,8 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
       _error = null;
       _isConnecting = true;
       _connectionStage = 'ESP32에 연결을 요청하고 있어요';
+      _postureHistory.clear();
+      _lastHistorySampleAt = null;
     });
     try {
       await FlutterBluePlus.stopScan();
@@ -1167,6 +1171,22 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
     final assessment = PostureAnalyzer.assess(frame.values);
     final now = DateTime.now();
     var warning = _postureWarning;
+
+    if (_calibrationStatus == CalibrationStatus.ready &&
+        assessment.lean != PostureLean.notSeated &&
+        (_lastHistorySampleAt == null ||
+            now.difference(_lastHistorySampleAt!) >=
+                const Duration(seconds: 1))) {
+      _lastHistorySampleAt = now;
+      _postureHistory.add(
+        PostureHistorySample(
+          recordedAt: now,
+          lateral: assessment.lateral,
+          longitudinal: assessment.longitudinal,
+        ),
+      );
+      if (_postureHistory.length > 300) _postureHistory.removeAt(0);
+    }
 
     if (_calibrationStatus != CalibrationStatus.ready ||
         assessment.lean == PostureLean.center ||
@@ -1569,6 +1589,33 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
                   const SizedBox(height: 12),
                 ],
                 _PressureSummary(values: _pressures),
+                const SizedBox(height: 14),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      '최근 자세 기록',
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const Text(
+                      '최근 5분 · 1초 간격',
+                      style: TextStyle(
+                        color: Color(0xff7a7f8d),
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                SizedBox(
+                  height: 150,
+                  child: PostureHistoryChart(
+                    samples: List.unmodifiable(_postureHistory),
+                  ),
+                ),
                 const SizedBox(height: 14),
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -2455,10 +2502,17 @@ class _ScannerOverlayPainter extends CustomPainter {
 enum PostureLean { notSeated, center, left, right, front, back }
 
 class PostureAssessment {
-  const PostureAssessment(this.lean, this.score);
+  const PostureAssessment(
+    this.lean,
+    this.score, {
+    this.lateral = 0,
+    this.longitudinal = 0,
+  });
 
   final PostureLean lean;
   final double score;
+  final double lateral;
+  final double longitudinal;
 
   String get message => switch (lean) {
     PostureLean.left => '왼쪽으로 치우쳐 있어요. 몸을 방석 중앙으로 옮겨 주세요.',
@@ -2498,18 +2552,221 @@ abstract final class PostureAnalyzer {
     final longitudinal = (front - back) / math.max(1, front + back);
 
     if (lateral.abs() < leanThreshold && longitudinal.abs() < leanThreshold) {
-      return const PostureAssessment(PostureLean.center, 0);
+      return PostureAssessment(
+        PostureLean.center,
+        0,
+        lateral: lateral,
+        longitudinal: longitudinal,
+      );
     }
     if (lateral.abs() >= longitudinal.abs()) {
       return PostureAssessment(
         lateral > 0 ? PostureLean.right : PostureLean.left,
         lateral.abs(),
+        lateral: lateral,
+        longitudinal: longitudinal,
       );
     }
     return PostureAssessment(
       longitudinal > 0 ? PostureLean.front : PostureLean.back,
       longitudinal.abs(),
+      lateral: lateral,
+      longitudinal: longitudinal,
     );
+  }
+}
+
+class PostureHistorySample {
+  const PostureHistorySample({
+    required this.recordedAt,
+    required this.lateral,
+    required this.longitudinal,
+  });
+
+  final DateTime recordedAt;
+  final double lateral;
+  final double longitudinal;
+}
+
+class PostureHistoryChart extends StatelessWidget {
+  const PostureHistoryChart({super.key, required this.samples});
+
+  final List<PostureHistorySample> samples;
+
+  @override
+  Widget build(BuildContext context) => Card(
+    margin: EdgeInsets.zero,
+    color: const Color(0xfffafaf7),
+    child: Padding(
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
+      child: Column(
+        children: [
+          const Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              _ChartLegend(color: Color(0xff2764d7), label: '좌우'),
+              SizedBox(width: 14),
+              _ChartLegend(color: Color(0xffe16b32), label: '앞뒤'),
+            ],
+          ),
+          const SizedBox(height: 5),
+          Expanded(
+            child: samples.isEmpty
+                ? const Center(
+                    child: Text(
+                      '정자세 측정이 시작되면 기록이 표시됩니다.',
+                      style: TextStyle(color: Color(0xff7a7f8d), fontSize: 12),
+                    ),
+                  )
+                : CustomPaint(
+                    painter: _PostureHistoryPainter(samples),
+                    size: Size.infinite,
+                  ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+class _ChartLegend extends StatelessWidget {
+  const _ChartLegend({required this.color, required this.label});
+
+  final Color color;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      Container(width: 16, height: 3, color: color),
+      const SizedBox(width: 5),
+      Text(
+        label,
+        style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700),
+      ),
+    ],
+  );
+}
+
+class _PostureHistoryPainter extends CustomPainter {
+  const _PostureHistoryPainter(this.samples);
+
+  final List<PostureHistorySample> samples;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    const labelWidth = 25.0;
+    const bottomSpace = 15.0;
+    final chart = Rect.fromLTWH(
+      labelWidth,
+      2,
+      math.max(1, size.width - labelWidth - 2),
+      math.max(1, size.height - bottomSpace - 2),
+    );
+    final grid = Paint()
+      ..color = const Color(0xffd9d9d2)
+      ..strokeWidth = 1;
+    final center = Paint()
+      ..color = const Color(0xff687078)
+      ..strokeWidth = 1.4;
+    final threshold = Paint()
+      ..color = const Color(0xffd39e00).withValues(alpha: .55)
+      ..strokeWidth = 1;
+
+    double yFor(double value) =>
+        chart.center.dy - value.clamp(-1.0, 1.0) * chart.height / 2;
+    canvas.drawLine(
+      Offset(chart.left, chart.center.dy),
+      Offset(chart.right, chart.center.dy),
+      center,
+    );
+    for (final value in const [-.2, .2]) {
+      canvas.drawLine(
+        Offset(chart.left, yFor(value)),
+        Offset(chart.right, yFor(value)),
+        threshold,
+      );
+    }
+    canvas.drawLine(chart.bottomLeft, chart.bottomRight, grid);
+    canvas.drawLine(chart.topLeft, chart.bottomLeft, grid);
+
+    _drawLabel(canvas, '치우침', const Offset(0, 0));
+    _drawLabel(canvas, '정자세', Offset(0, chart.center.dy - 6));
+    _drawLabel(canvas, '5분 전', Offset(chart.left, chart.bottom + 2));
+    _drawLabel(canvas, '현재', Offset(chart.right - 22, chart.bottom + 2));
+
+    _drawSeries(
+      canvas,
+      chart,
+      (sample) => sample.lateral,
+      const Color(0xff2764d7),
+    );
+    _drawSeries(
+      canvas,
+      chart,
+      (sample) => sample.longitudinal,
+      const Color(0xffe16b32),
+    );
+  }
+
+  void _drawSeries(
+    Canvas canvas,
+    Rect chart,
+    double Function(PostureHistorySample sample) valueOf,
+    Color color,
+  ) {
+    if (samples.isEmpty) return;
+    final path = Path();
+    final windowEnd = samples.last.recordedAt;
+    final windowStart = windowEnd.subtract(const Duration(minutes: 5));
+    final windowMilliseconds = const Duration(minutes: 5).inMilliseconds;
+    for (var index = 0; index < samples.length; index++) {
+      final elapsed = samples[index].recordedAt
+          .difference(windowStart)
+          .inMilliseconds
+          .clamp(0, windowMilliseconds);
+      final x = chart.left + chart.width * elapsed / windowMilliseconds;
+      final y =
+          chart.center.dy -
+          valueOf(samples[index]).clamp(-1.0, 1.0) * chart.height / 2;
+      if (index == 0) {
+        path.moveTo(x, y);
+      } else {
+        path.lineTo(x, y);
+      }
+    }
+    canvas.drawPath(
+      path,
+      Paint()
+        ..color = color
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round,
+    );
+  }
+
+  void _drawLabel(Canvas canvas, String text, Offset offset) {
+    final painter = TextPainter(
+      text: TextSpan(
+        text: text,
+        style: const TextStyle(fontSize: 9, color: Color(0xff747987)),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    painter.paint(canvas, offset);
+  }
+
+  @override
+  bool shouldRepaint(covariant _PostureHistoryPainter oldDelegate) {
+    if (samples.length != oldDelegate.samples.length) return true;
+    if (samples.isEmpty) return false;
+    final current = samples.last;
+    final previous = oldDelegate.samples.last;
+    return current.recordedAt != previous.recordedAt ||
+        current.lateral != previous.lateral ||
+        current.longitudinal != previous.longitudinal;
   }
 }
 

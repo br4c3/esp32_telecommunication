@@ -83,6 +83,10 @@ void main() {
       PostureLean.right,
     );
     expect(
+      PostureAnalyzer.assess([80, 220, 80, 220, 100]).lateral,
+      greaterThan(.2),
+    );
+    expect(
       PostureAnalyzer.assess([220, 220, 70, 70, 70]).lean,
       PostureLean.front,
     );
@@ -91,6 +95,40 @@ void main() {
       PostureLean.back,
     );
     expect(PostureAnalyzer.assess([5, 5, 5, 5, 5]).lean, PostureLean.notSeated);
+  });
+
+  testWidgets('renders five-minute posture history as a time series', (
+    tester,
+  ) async {
+    final now = DateTime(2026, 10, 8, 12);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SizedBox(
+            width: 400,
+            height: 180,
+            child: PostureHistoryChart(
+              samples: [
+                PostureHistorySample(
+                  recordedAt: now.subtract(const Duration(minutes: 1)),
+                  lateral: -.25,
+                  longitudinal: .1,
+                ),
+                PostureHistorySample(
+                  recordedAt: now,
+                  lateral: .15,
+                  longitudinal: -.3,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('좌우'), findsOneWidget);
+    expect(find.text('앞뒤'), findsOneWidget);
+    expect(find.byType(CustomPaint), findsWidgets);
   });
 
   testWidgets('posture alert is shown as an in-app popup', (tester) async {
