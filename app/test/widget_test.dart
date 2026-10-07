@@ -102,6 +102,18 @@ void main() {
       PostureAnalyzer.assess([70, 70, 200, 200, 200]).lean,
       PostureLean.back,
     );
+    expect(
+      PostureAnalyzer.assess([900, 100, 100, 100, 100]).lean,
+      PostureLean.left,
+    );
+    expect(
+      PostureAnalyzer.assess([100, 900, 100, 100, 100]).lean,
+      PostureLean.right,
+    );
+    expect(
+      PostureAnalyzer.assess([140, 100, 140, 100, 100]).lean,
+      PostureLean.left,
+    );
     expect(PostureAnalyzer.assess([5, 5, 5, 5, 5]).lean, PostureLean.notSeated);
   });
 
@@ -110,6 +122,13 @@ void main() {
     record.addAssessment(const PostureAssessment(PostureLean.center, 0), 9);
     record.addAssessment(const PostureAssessment(PostureLean.left, .3), 9);
     record.addUnavailable(10);
+    record.addPressureFrame(
+      const PressureTimelineFrame(
+        secondOfDay: 32405,
+        values: [100, 200, 300, 400, 500],
+      ),
+    );
+    record.addPressureFrame(const PressureTimelineFrame(secondOfDay: 32410));
 
     final restored = DailyPostureRecord.fromJson(record.toJson());
     expect(restored.centered, 1);
@@ -117,6 +136,9 @@ void main() {
     expect(restored.unavailable, 1);
     expect(restored.totalSeconds, 3);
     expect(restored.postureScore, 50);
+    expect(restored.pressureFrames, hasLength(2));
+    expect(restored.pressureFrames.first.values, [100, 200, 300, 400, 500]);
+    expect(restored.pressureFrames.last.isAvailable, isFalse);
   });
 
   testWidgets('renders readable daily posture charts', (tester) async {
@@ -145,6 +167,40 @@ void main() {
     expect(find.textContaining('오른쪽'), findsOneWidget);
     expect(find.textContaining('미측정'), findsOneWidget);
     expect(find.byType(CustomPaint), findsWidgets);
+  });
+
+  testWidgets('timelapse shows pressure and unavailable frames', (
+    tester,
+  ) async {
+    const frames = [
+      PressureTimelineFrame(
+        secondOfDay: 32405,
+        values: [1200, 800, 1000, 900, 1100],
+      ),
+      PressureTimelineFrame(secondOfDay: 32410),
+    ];
+    await tester.pumpWidget(
+      MaterialApp(
+        home: PressureTimelapsePage(
+          date: DateTime(2026, 10, 8),
+          frames: frames,
+        ),
+      ),
+    );
+
+    expect(find.text('09:00:05'), findsOneWidget);
+    await tester.drag(find.byType(ListView), const Offset(0, -360));
+    await tester.pump();
+    expect(find.text('재생'), findsOneWidget);
+    expect(find.text('1x'), findsOneWidget);
+    expect(find.text('16x'), findsOneWidget);
+
+    await tester.drag(find.byType(Slider), const Offset(500, 0));
+    await tester.pump();
+    await tester.drag(find.byType(ListView), const Offset(0, 360));
+    await tester.pump();
+    expect(find.text('09:00:10'), findsOneWidget);
+    expect(find.text('이 구간은 미측정입니다'), findsOneWidget);
   });
 
   testWidgets('posture alert is shown as an in-app popup', (tester) async {

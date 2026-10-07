@@ -774,6 +774,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
   PostureLean? _leanCandidate;
   DateTime? _leanStartedAt;
   DateTime? _lastPostureNotificationAt;
+  PostureLean? _lastNotifiedLean;
   String? _postureWarning;
   bool _posturePopupOpen = false;
   int _selectedTab = 0;
@@ -785,6 +786,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
   late DateTime _selectedHistoryDate;
   DateTime? _lastPressureFrameAt;
   PostureAssessment? _latestPostureAssessment;
+  int? _lastTimelineSlot;
   List<double> _pressures = List<double>.filled(5, 0);
 
   @override
@@ -866,8 +868,11 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
   }
 
   void _scheduleDailyHistorySave() {
-    _historySaveTimer?.cancel();
-    _historySaveTimer = Timer(const Duration(seconds: 5), _saveDailyHistory);
+    if (_historySaveTimer?.isActive == true) return;
+    _historySaveTimer = Timer(const Duration(seconds: 5), () {
+      _historySaveTimer = null;
+      _saveDailyHistory();
+    });
   }
 
   Future<void> _saveDailyHistory() async {
@@ -878,6 +883,15 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
       final date = DateTime.tryParse(key);
       return date != null && date.isBefore(cutoff);
     });
+    final timelineCutoff = DateUtils.dateOnly(
+      DateTime.now().subtract(const Duration(days: 7)),
+    );
+    for (final record in _dailyHistory.values) {
+      final date = DateTime.tryParse(record.dateKey);
+      if (date != null && date.isBefore(timelineCutoff)) {
+        record.pressureFrames.clear();
+      }
+    }
     final encoded = jsonEncode(
       _dailyHistory.map((key, value) => MapEntry(key, value.toJson())),
     );
@@ -915,6 +929,21 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
       }
     } else {
       record.addUnavailable(now.hour);
+    }
+    final timelineSlot = now.millisecondsSinceEpoch ~/ 5000;
+    if (_lastTimelineSlot != timelineSlot) {
+      _lastTimelineSlot = timelineSlot;
+      record.addPressureFrame(
+        PressureTimelineFrame(
+          secondOfDay: now.hour * 3600 + now.minute * 60 + now.second,
+          values: hasFreshSensorData
+              ? _pressures
+                    .take(5)
+                    .map((value) => value.round().clamp(0, 65535))
+                    .toList(growable: false)
+              : null,
+        ),
+      );
     }
     _scheduleDailyHistorySave();
     if (mounted && _selectedTab == 2) setState(() {});
@@ -1268,6 +1297,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
       _warningSensors = const [];
       _leanCandidate = null;
       _leanStartedAt = null;
+      _lastNotifiedLean = null;
       _postureWarning = null;
       _pressures = List<double>.filled(5, 0);
     });
@@ -1296,13 +1326,13 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
           startedAt != null &&
           now.difference(startedAt) >= const Duration(seconds: 3);
       final cooledDown =
+          _lastNotifiedLean != assessment.lean ||
           lastNotification == null ||
           now.difference(lastNotification) >= const Duration(minutes: 1);
       if (sustained) {
         warning = assessment.message;
         if (cooledDown) {
-          _lastPostureNotificationAt = now;
-          unawaited(_showPosturePopup(assessment.message));
+          unawaited(_showPosturePopup(assessment.lean, assessment.message));
         }
       }
     }
@@ -1315,9 +1345,11 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
     }
   }
 
-  Future<void> _showPosturePopup(String message) async {
+  Future<void> _showPosturePopup(PostureLean lean, String message) async {
     if (!mounted || _posturePopupOpen) return;
     _posturePopupOpen = true;
+    _lastNotifiedLean = lean;
+    _lastPostureNotificationAt = DateTime.now();
     await showDialog<void>(
       context: context,
       builder: (dialogContext) => PostureAlertDialog(message: message),
@@ -1695,8 +1727,6 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
                   _PostureWarning(message: _postureWarning!),
                   const SizedBox(height: 12),
                 ],
-                _PressureSummary(values: _pressures),
-                const SizedBox(height: 14),
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
@@ -1707,7 +1737,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
                       ),
                     ),
                     Text(
-                      'RBF · 20 Hz',
+                      '실시간 · 20 Hz',
                       style: Theme.of(context).textTheme.labelMedium?.copyWith(
                         color: const Color(0xff7a7f8d),
                         fontWeight: FontWeight.w700,
@@ -1794,7 +1824,6 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
   Widget _buildHistoryTab(BuildContext context) {
     final record = _dailyHistory[_dateKey(_selectedHistoryDate)];
     final today = DateUtils.dateOnly(DateTime.now());
-    final isToday = DateUtils.isSameDay(_selectedHistoryDate, today);
     String duration(int seconds) {
       if (seconds < 60) return '$seconds초';
       final hours = seconds ~/ 3600;
@@ -1804,52 +1833,39 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
 
     return ListView(
       children: [
-        Row(
-          children: [
-            IconButton.outlined(
-              onPressed: () => setState(
-                () => _selectedHistoryDate = _selectedHistoryDate.subtract(
-                  const Duration(days: 1),
-                ),
-              ),
-              icon: const Icon(Icons.chevron_left_rounded),
-              tooltip: '이전 날짜',
-            ),
-            Expanded(
-              child: Column(
-                children: [
-                  Text(
-                    '${_selectedHistoryDate.year}년 ${_selectedHistoryDate.month}월 ${_selectedHistoryDate.day}일',
-                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w900,
-                    ),
-                  ),
-                  Text(
-                    isToday
-                        ? '오늘'
-                        : _weekdayLabel(_selectedHistoryDate.weekday),
-                    style: const TextStyle(
-                      color: Color(0xff747987),
-                      fontSize: 12,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            IconButton.outlined(
-              onPressed: isToday
-                  ? null
-                  : () => setState(
-                      () => _selectedHistoryDate = _selectedHistoryDate.add(
-                        const Duration(days: 1),
-                      ),
-                    ),
-              icon: const Icon(Icons.chevron_right_rounded),
-              tooltip: '다음 날짜',
-            ),
-          ],
+        Text(
+          '날짜별 기록',
+          style: Theme.of(
+            context,
+          ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900),
         ),
-        const SizedBox(height: 14),
+        const SizedBox(height: 10),
+        SizedBox(
+          height: 76,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            itemCount: 90,
+            separatorBuilder: (_, _) => const SizedBox(width: 8),
+            itemBuilder: (context, index) {
+              final date = today.subtract(Duration(days: index));
+              final selected = DateUtils.isSameDay(date, _selectedHistoryDate);
+              final label = index == 0
+                  ? '오늘'
+                  : index == 1
+                  ? '어제'
+                  : _weekdayLabel(date.weekday).substring(0, 1);
+              return _HistoryDateCard(
+                label: label,
+                date: '${date.month}/${date.day}',
+                selected: selected,
+                hasRecord:
+                    (_dailyHistory[_dateKey(date)]?.totalSeconds ?? 0) > 0,
+                onTap: () => setState(() => _selectedHistoryDate = date),
+              );
+            },
+          ),
+        ),
+        const SizedBox(height: 16),
         if (record == null || record.totalSeconds == 0) ...[
           const SizedBox(height: 80),
           const Icon(
@@ -1914,6 +1930,27 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
           ),
           const SizedBox(height: 8),
           SizedBox(height: 190, child: DailyPostureBarChart(record: record)),
+          const SizedBox(height: 18),
+          Text(
+            '압력 타임랩스',
+            style: Theme.of(
+              context,
+            ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900),
+          ),
+          const SizedBox(height: 8),
+          _TimelapseEntryCard(
+            frameCount: record.pressureFrames.length,
+            onOpen: record.pressureFrames.isEmpty
+                ? null
+                : () => Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => PressureTimelapsePage(
+                        date: _selectedHistoryDate,
+                        frames: List.of(record.pressureFrames),
+                      ),
+                    ),
+                  ),
+          ),
           const SizedBox(height: 18),
           const _HistoryHintCard(),
         ],
@@ -2746,15 +2783,17 @@ abstract final class PostureAnalyzer {
   static PostureAssessment assess(
     List<double> values, {
     double minimumTotalPressure = 125,
-    double leanThreshold = .20,
+    double lateralLeanThreshold = .14,
+    double longitudinalLeanThreshold = .20,
+    double edgeLoadThreshold = .50,
   }) {
     if (values.length != 5) {
       return const PostureAssessment(PostureLean.notSeated, 0);
     }
-    final total = values.fold<double>(
-      0,
-      (sum, value) => sum + math.max(0, value),
-    );
+    final normalized = values
+        .map((value) => math.max(0.0, value))
+        .toList(growable: false);
+    final total = normalized.fold<double>(0, (sum, value) => sum + value);
     if (total < minimumTotalPressure) {
       return const PostureAssessment(PostureLean.notSeated, 0);
     }
@@ -2762,14 +2801,21 @@ abstract final class PostureAnalyzer {
     // Sensor order: L1, R1, L2, R2, C1. Balance calibration normalizes
     // their reference response, so comparing side averages is relative to the
     // user's saved upright posture rather than raw sensor sensitivity.
-    final left = (values[0] + values[2]) / 2;
-    final right = (values[1] + values[3]) / 2;
-    final front = (values[0] + values[1]) / 2;
-    final back = (values[2] + values[3] + values[4]) / 3;
+    final left = (normalized[0] + normalized[2]) / 2;
+    final right = (normalized[1] + normalized[3]) / 2;
+    final front = (normalized[0] + normalized[1]) / 2;
+    final back = (normalized[2] + normalized[3] + normalized[4]) / 3;
     final lateral = (right - left) / math.max(1, right + left);
     final longitudinal = (front - back) / math.max(1, front + back);
+    final leftEdgeShare = (normalized[0] + normalized[2]) / total;
+    final rightEdgeShare = (normalized[1] + normalized[3]) / total;
+    final edgeLoaded =
+        leftEdgeShare >= edgeLoadThreshold ||
+        rightEdgeShare >= edgeLoadThreshold;
+    final lateralLean = lateral.abs() >= lateralLeanThreshold || edgeLoaded;
+    final longitudinalLean = longitudinal.abs() >= longitudinalLeanThreshold;
 
-    if (lateral.abs() < leanThreshold && longitudinal.abs() < leanThreshold) {
+    if (!lateralLean && !longitudinalLean) {
       return PostureAssessment(
         PostureLean.center,
         0,
@@ -2777,10 +2823,14 @@ abstract final class PostureAnalyzer {
         longitudinal: longitudinal,
       );
     }
-    if (lateral.abs() >= longitudinal.abs()) {
+    if (lateralLean &&
+        (!longitudinalLean || lateral.abs() >= longitudinal.abs())) {
+      final leansRight = edgeLoaded
+          ? rightEdgeShare > leftEdgeShare
+          : lateral > 0;
       return PostureAssessment(
-        lateral > 0 ? PostureLean.right : PostureLean.left,
-        lateral.abs(),
+        leansRight ? PostureLean.right : PostureLean.left,
+        math.max(lateral.abs(), math.max(leftEdgeShare, rightEdgeShare)),
         lateral: lateral,
         longitudinal: longitudinal,
       );
@@ -2851,8 +2901,38 @@ class HourlyPostureBucket {
       );
 }
 
+class PressureTimelineFrame {
+  const PressureTimelineFrame({required this.secondOfDay, this.values});
+
+  final int secondOfDay;
+  final List<int>? values;
+  bool get isAvailable => values != null && values!.length >= 5;
+
+  List<int> toJson() =>
+      isAvailable ? [secondOfDay, ...values!.take(5)] : [secondOfDay, -1];
+
+  factory PressureTimelineFrame.fromJson(List<dynamic> json) {
+    final second = json.isNotEmpty && json.first is num
+        ? (json.first as num).toInt().clamp(0, 86399)
+        : 0;
+    if (json.length < 6 || json[1] == -1) {
+      return PressureTimelineFrame(secondOfDay: second);
+    }
+    final values = json
+        .skip(1)
+        .take(5)
+        .map((value) => value is num ? value.toInt().clamp(0, 65535) : 0)
+        .toList(growable: false);
+    return PressureTimelineFrame(secondOfDay: second, values: values);
+  }
+}
+
 class DailyPostureRecord {
-  DailyPostureRecord({required this.dateKey, required this.hours});
+  DailyPostureRecord({
+    required this.dateKey,
+    required this.hours,
+    List<PressureTimelineFrame>? pressureFrames,
+  }) : pressureFrames = pressureFrames ?? [];
 
   factory DailyPostureRecord.empty(String dateKey) => DailyPostureRecord(
     dateKey: dateKey,
@@ -2874,14 +2954,25 @@ class DailyPostureRecord {
     while (hours.length < 24) {
       hours.add(HourlyPostureBucket());
     }
+    final pressureFrames = <PressureTimelineFrame>[];
+    final rawFrames = json['pressureFrames'];
+    if (rawFrames is List) {
+      for (final frame in rawFrames) {
+        if (frame is List) {
+          pressureFrames.add(PressureTimelineFrame.fromJson(frame));
+        }
+      }
+    }
     return DailyPostureRecord(
       dateKey: json['dateKey'] as String? ?? '',
       hours: hours,
+      pressureFrames: pressureFrames,
     );
   }
 
   final String dateKey;
   final List<HourlyPostureBucket> hours;
+  final List<PressureTimelineFrame> pressureFrames;
 
   int get centered => hours.fold(0, (sum, hour) => sum + hour.centered);
   int get left => hours.fold(0, (sum, hour) => sum + hour.left);
@@ -2917,10 +3008,85 @@ class DailyPostureRecord {
     hours[hour.clamp(0, 23)].unavailable++;
   }
 
+  void addPressureFrame(PressureTimelineFrame frame) {
+    if (pressureFrames.isNotEmpty &&
+        pressureFrames.last.secondOfDay == frame.secondOfDay) {
+      pressureFrames[pressureFrames.length - 1] = frame;
+      return;
+    }
+    pressureFrames.add(frame);
+  }
+
   Map<String, dynamic> toJson() => {
     'dateKey': dateKey,
     'hours': hours.map((hour) => hour.toJson()).toList(growable: false),
+    if (pressureFrames.isNotEmpty)
+      'pressureFrames': pressureFrames
+          .map((frame) => frame.toJson())
+          .toList(growable: false),
   };
+}
+
+class _HistoryDateCard extends StatelessWidget {
+  const _HistoryDateCard({
+    required this.label,
+    required this.date,
+    required this.selected,
+    required this.hasRecord,
+    required this.onTap,
+  });
+
+  final String label;
+  final String date;
+  final bool selected;
+  final bool hasRecord;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => Material(
+    color: selected ? AppColors.ink : const Color(0xfff1f1ed),
+    borderRadius: BorderRadius.circular(12),
+    child: InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: SizedBox(
+        width: 68,
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text(
+              label,
+              style: TextStyle(
+                color: selected ? Colors.white70 : const Color(0xff747987),
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 3),
+            Text(
+              date,
+              style: TextStyle(
+                color: selected ? Colors.white : AppColors.ink,
+                fontSize: 16,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            const SizedBox(height: 5),
+            Container(
+              width: 5,
+              height: 5,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: hasRecord
+                    ? AppColors.corporateYellow
+                    : Colors.transparent,
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
 }
 
 class _PostureScoreCard extends StatelessWidget {
@@ -3203,6 +3369,314 @@ class _DailyPostureBarPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _DailyPostureBarPainter oldDelegate) => true;
+}
+
+class _TimelapseEntryCard extends StatelessWidget {
+  const _TimelapseEntryCard({required this.frameCount, required this.onOpen});
+
+  final int frameCount;
+  final VoidCallback? onOpen;
+
+  @override
+  Widget build(BuildContext context) => Card(
+    margin: EdgeInsets.zero,
+    child: InkWell(
+      onTap: onOpen,
+      borderRadius: BorderRadius.circular(12),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Row(
+          children: [
+            Container(
+              width: 50,
+              height: 50,
+              decoration: BoxDecoration(
+                color: onOpen == null
+                    ? const Color(0xffecece8)
+                    : const Color(0xfffff2bd),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Icon(
+                Icons.movie_filter_outlined,
+                color: onOpen == null ? const Color(0xff9a9da5) : AppColors.ink,
+              ),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    onOpen == null ? '타임랩스 기록 없음' : '타임랩스 보기',
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    onOpen == null
+                        ? '새로 측정되는 압력부터 5초 간격으로 저장됩니다.'
+                        : '$frameCount개 프레임 · 5초 간격',
+                    style: const TextStyle(
+                      color: Color(0xff747987),
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Icon(
+              Icons.chevron_right_rounded,
+              color: onOpen == null ? const Color(0xffc2c3be) : AppColors.ink,
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
+class PressureTimelapsePage extends StatefulWidget {
+  const PressureTimelapsePage({
+    super.key,
+    required this.date,
+    required this.frames,
+  });
+
+  final DateTime date;
+  final List<PressureTimelineFrame> frames;
+
+  @override
+  State<PressureTimelapsePage> createState() => _PressureTimelapsePageState();
+}
+
+class _PressureTimelapsePageState extends State<PressureTimelapsePage> {
+  Timer? _playbackTimer;
+  int _frameIndex = 0;
+  int _speed = 4;
+  bool _isPlaying = false;
+
+  Duration get _frameInterval => switch (_speed) {
+    1 => const Duration(milliseconds: 400),
+    4 => const Duration(milliseconds: 120),
+    _ => const Duration(milliseconds: 45),
+  };
+
+  PressureTimelineFrame get _frame => widget.frames[_frameIndex];
+
+  String _clockLabel(int secondOfDay) {
+    final hour = secondOfDay ~/ 3600;
+    final minute = (secondOfDay % 3600) ~/ 60;
+    final second = secondOfDay % 60;
+    return '${hour.toString().padLeft(2, '0')}:'
+        '${minute.toString().padLeft(2, '0')}:'
+        '${second.toString().padLeft(2, '0')}';
+  }
+
+  void _togglePlayback() {
+    if (_isPlaying) {
+      _stopPlayback();
+      return;
+    }
+    if (_frameIndex >= widget.frames.length - 1) _frameIndex = 0;
+    setState(() => _isPlaying = true);
+    _startPlaybackTimer();
+  }
+
+  void _startPlaybackTimer() {
+    _playbackTimer?.cancel();
+    _playbackTimer = Timer.periodic(_frameInterval, (_) {
+      if (!mounted) return;
+      if (_frameIndex >= widget.frames.length - 1) {
+        _stopPlayback();
+        return;
+      }
+      setState(() => _frameIndex++);
+    });
+  }
+
+  void _stopPlayback() {
+    _playbackTimer?.cancel();
+    _playbackTimer = null;
+    if (mounted) setState(() => _isPlaying = false);
+  }
+
+  void _setSpeed(int speed) {
+    setState(() => _speed = speed);
+    if (_isPlaying) _startPlaybackTimer();
+  }
+
+  @override
+  void dispose() {
+    _playbackTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final frame = _frame;
+    final pressures = frame.isAvailable
+        ? frame.values!.map((value) => value.toDouble()).toList(growable: false)
+        : List<double>.filled(5, 0);
+    final assessment = frame.isAvailable
+        ? PostureAnalyzer.assess(pressures)
+        : null;
+    return Scaffold(
+      appBar: AppBar(title: const Text('압력 타임랩스')),
+      body: SafeArea(
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 620),
+            child: ListView(
+              padding: const EdgeInsets.fromLTRB(20, 18, 20, 28),
+              children: [
+                Text(
+                  '${widget.date.year}년 ${widget.date.month}월 ${widget.date.day}일',
+                  style: const TextStyle(
+                    fontSize: 14,
+                    color: Color(0xff747987),
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        _clockLabel(frame.secondOfDay),
+                        key: const ValueKey('timelapse-clock'),
+                        style: const TextStyle(
+                          fontSize: 30,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                    ),
+                    _TimelapseStatusBadge(
+                      label: assessment?.message ?? '센서값 없음',
+                      available: frame.isAvailable,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Card(
+                  color: const Color(0xfff5f5f1),
+                  child: SizedBox(
+                    height: 430,
+                    child: Stack(
+                      alignment: Alignment.center,
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.all(16),
+                          child: PressureGrid(values: pressures),
+                        ),
+                        if (!frame.isAvailable)
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 18,
+                              vertical: 12,
+                            ),
+                            decoration: BoxDecoration(
+                              color: AppColors.ink.withValues(alpha: .88),
+                              borderRadius: BorderRadius.circular(24),
+                            ),
+                            child: const Text(
+                              '이 구간은 미측정입니다',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.w900,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+                Slider(
+                  value: _frameIndex.toDouble(),
+                  min: 0,
+                  max: math.max(1, widget.frames.length - 1).toDouble(),
+                  divisions: widget.frames.length > 1
+                      ? widget.frames.length - 1
+                      : 1,
+                  label: _clockLabel(frame.secondOfDay),
+                  onChanged: (value) {
+                    _playbackTimer?.cancel();
+                    setState(() {
+                      _isPlaying = false;
+                      _frameIndex = value.round().clamp(
+                        0,
+                        widget.frames.length - 1,
+                      );
+                    });
+                  },
+                ),
+                Row(
+                  children: [
+                    FilledButton.icon(
+                      onPressed: _togglePlayback,
+                      icon: Icon(
+                        _isPlaying
+                            ? Icons.pause_rounded
+                            : Icons.play_arrow_rounded,
+                      ),
+                      label: Text(_isPlaying ? '일시정지' : '재생'),
+                    ),
+                    const Spacer(),
+                    for (final speed in const [1, 4, 16]) ...[
+                      ChoiceChip(
+                        label: Text('${speed}x'),
+                        selected: _speed == speed,
+                        onSelected: (_) => _setSpeed(speed),
+                      ),
+                      if (speed != 16) const SizedBox(width: 6),
+                    ],
+                  ],
+                ),
+                const SizedBox(height: 12),
+                const Text(
+                  '압력 프레임은 5초 간격으로 저장되며, 상세 타임랩스는 최근 7일간 보관됩니다.',
+                  style: TextStyle(
+                    color: Color(0xff747987),
+                    fontSize: 12,
+                    height: 1.4,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _TimelapseStatusBadge extends StatelessWidget {
+  const _TimelapseStatusBadge({required this.label, required this.available});
+
+  final String label;
+  final bool available;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    constraints: const BoxConstraints(maxWidth: 260),
+    padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
+    decoration: BoxDecoration(
+      color: available ? const Color(0xffe2f6ef) : const Color(0xffe7e7e3),
+      borderRadius: BorderRadius.circular(18),
+    ),
+    child: Text(
+      label,
+      maxLines: 2,
+      overflow: TextOverflow.ellipsis,
+      textAlign: TextAlign.center,
+      style: TextStyle(
+        color: available ? const Color(0xff08785e) : const Color(0xff747987),
+        fontSize: 11,
+        fontWeight: FontWeight.w800,
+      ),
+    ),
+  );
 }
 
 class _HistoryHintCard extends StatelessWidget {
@@ -3514,7 +3988,7 @@ class PressureGrid extends StatelessWidget {
           constraints.maxHeight * .80,
         );
         final height = width / .80;
-        const top = 24.0;
+        const top = 34.0;
         final bodyHeight = height - top * 2;
         final markerSize = math.min(50.0, width * .14);
 
@@ -3533,31 +4007,51 @@ class PressureGrid extends StatelessWidget {
                   ),
                 ),
                 const Positioned(
-                  top: 5,
+                  top: 4,
                   left: 0,
                   right: 0,
-                  child: Text(
-                    '앞 · 무릎 방향',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      color: Color(0xff7c8290),
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
-                    ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(
+                        Icons.arrow_upward_rounded,
+                        size: 18,
+                        color: Color(0xff353a44),
+                      ),
+                      SizedBox(width: 4),
+                      Text(
+                        '앞 · 무릎 방향',
+                        style: TextStyle(
+                          color: Color(0xff353a44),
+                          fontSize: 15,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
                 const Positioned(
-                  bottom: 4,
+                  bottom: 3,
                   left: 0,
                   right: 0,
-                  child: Text(
-                    '뒤 · 등받이 방향',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      color: Color(0xff7c8290),
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
-                    ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(
+                        Icons.arrow_downward_rounded,
+                        size: 18,
+                        color: Color(0xff353a44),
+                      ),
+                      SizedBox(width: 4),
+                      Text(
+                        '뒤 · 등받이 방향',
+                        style: TextStyle(
+                          color: Color(0xff353a44),
+                          fontSize: 15,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
                 for (var index = 0; index < sensorValues.length; index++)
@@ -3612,8 +4106,8 @@ class _CushionGridPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    final top = 24.0;
-    final bottom = size.height - 24;
+    final top = 34.0;
+    final bottom = size.height - 34;
     final rows = field.length;
     final columns = field.first.length;
     final rowHeight = (bottom - top) / rows;
