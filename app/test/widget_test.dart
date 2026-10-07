@@ -4,6 +4,20 @@ import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
 void main() {
+  testWidgets('login uses cushion branding and official provider labels', (
+    tester,
+  ) async {
+    await tester.pumpWidget(const MaterialApp(home: LoginPage()));
+
+    expect(find.byType(SeatCareCushionIcon), findsOneWidget);
+    expect(find.text('Google로 계속하기'), findsOneWidget);
+    expect(find.text('Apple로 계속하기'), findsOneWidget);
+    expect(
+      find.image(const AssetImage('assets/images/google_g.png')),
+      findsOneWidget,
+    );
+  });
+
   testWidgets('shows disconnected terminal screen', (tester) async {
     await tester.pumpWidget(const Esp32App(requestBluetoothOnLaunch: false));
 

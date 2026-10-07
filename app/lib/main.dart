@@ -277,6 +277,14 @@ class _LoginPageState extends State<LoginPage> {
     await _signIn(provider);
   }
 
+  Future<void> _signInWithApple() async {
+    final provider = AppleAuthProvider()
+      ..addScope('email')
+      ..addScope('name')
+      ..setCustomParameters({'locale': 'ko'});
+    await _signIn(provider);
+  }
+
   @override
   Widget build(BuildContext context) => Scaffold(
     body: SafeArea(
@@ -292,11 +300,7 @@ class _LoginPageState extends State<LoginPage> {
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    const Icon(
-                      Icons.airline_seat_recline_normal_rounded,
-                      size: 52,
-                      color: AppColors.ink,
-                    ),
+                    const Center(child: SeatCareCushionIcon(size: 68)),
                     const SizedBox(height: 16),
                     Text(
                       'SEAT CARE',
@@ -313,17 +317,59 @@ class _LoginPageState extends State<LoginPage> {
                     const SizedBox(height: 26),
                     SizedBox(
                       height: 50,
-                      child: OutlinedButton.icon(
+                      child: OutlinedButton(
                         onPressed: _submitting ? null : _signInWithGoogle,
-                        icon: const Text(
-                          'G',
-                          style: TextStyle(
-                            fontSize: 19,
-                            fontWeight: FontWeight.w900,
-                            color: Color(0xff4285f4),
+                        style: OutlinedButton.styleFrom(
+                          backgroundColor: Colors.white,
+                          foregroundColor: const Color(0xff1f1f1f),
+                          disabledBackgroundColor: Colors.white,
+                          side: const BorderSide(color: Color(0xff747775)),
+                          padding: const EdgeInsets.symmetric(horizontal: 12),
+                          textStyle: const TextStyle(
+                            fontSize: 14,
+                            height: 20 / 14,
+                            fontWeight: FontWeight.w500,
                           ),
                         ),
-                        label: const Text('Google로 계속하기'),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Image.asset(
+                              'assets/images/google_g.png',
+                              width: 20,
+                              height: 20,
+                              filterQuality: FilterQuality.high,
+                            ),
+                            const SizedBox(width: 10),
+                            const Text('Google로 계속하기'),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    SizedBox(
+                      height: 50,
+                      child: FilledButton(
+                        onPressed: _submitting ? null : _signInWithApple,
+                        style: FilledButton.styleFrom(
+                          backgroundColor: Colors.black,
+                          foregroundColor: Colors.white,
+                          disabledBackgroundColor: const Color(0xff555555),
+                          disabledForegroundColor: Colors.white70,
+                          padding: const EdgeInsets.symmetric(horizontal: 12),
+                          textStyle: const TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        child: const Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(Icons.apple, size: 22),
+                            SizedBox(width: 10),
+                            Text('Apple로 계속하기'),
+                          ],
+                        ),
                       ),
                     ),
                     if (_submitting) ...[
@@ -356,6 +402,112 @@ class _LoginPageState extends State<LoginPage> {
       ),
     ),
   );
+}
+
+class SeatCareCushionIcon extends StatelessWidget {
+  const SeatCareCushionIcon({super.key, this.size = 68});
+
+  final double size;
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+    label: 'Seat Care 방석',
+    image: true,
+    child: SizedBox(
+      width: size,
+      height: size * .72,
+      child: const CustomPaint(painter: _SeatCareCushionPainter()),
+    ),
+  );
+}
+
+class _SeatCareCushionPainter extends CustomPainter {
+  const _SeatCareCushionPainter();
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final silhouette = Paint()
+      ..color = Colors.black
+      ..style = PaintingStyle.fill;
+    final shape = Path()
+      ..moveTo(size.width * .19, size.height * .07)
+      ..quadraticBezierTo(
+        size.width * .50,
+        -size.height * .01,
+        size.width * .81,
+        size.height * .07,
+      )
+      ..quadraticBezierTo(
+        size.width * .95,
+        size.height * .12,
+        size.width * .91,
+        size.height * .32,
+      )
+      ..lineTo(size.width * .83, size.height * .82)
+      ..quadraticBezierTo(
+        size.width * .80,
+        size.height * .97,
+        size.width * .64,
+        size.height * .94,
+      )
+      ..quadraticBezierTo(
+        size.width * .50,
+        size.height * .89,
+        size.width * .36,
+        size.height * .94,
+      )
+      ..quadraticBezierTo(
+        size.width * .20,
+        size.height * .97,
+        size.width * .17,
+        size.height * .82,
+      )
+      ..lineTo(size.width * .09, size.height * .32)
+      ..quadraticBezierTo(
+        size.width * .05,
+        size.height * .12,
+        size.width * .19,
+        size.height * .07,
+      )
+      ..close();
+    canvas.drawPath(shape, silhouette);
+
+    final seam = Paint()
+      ..color = Colors.white.withValues(alpha: .58)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = size.width * .025
+      ..strokeCap = StrokeCap.round;
+    final inset = Path()
+      ..moveTo(size.width * .21, size.height * .27)
+      ..quadraticBezierTo(
+        size.width * .50,
+        size.height * .19,
+        size.width * .79,
+        size.height * .27,
+      )
+      ..quadraticBezierTo(
+        size.width * .76,
+        size.height * .55,
+        size.width * .69,
+        size.height * .76,
+      )
+      ..quadraticBezierTo(
+        size.width * .50,
+        size.height * .69,
+        size.width * .31,
+        size.height * .76,
+      )
+      ..quadraticBezierTo(
+        size.width * .24,
+        size.height * .55,
+        size.width * .21,
+        size.height * .27,
+      );
+    canvas.drawPath(inset, seam);
+  }
+
+  @override
+  bool shouldRepaint(covariant _SeatCareCushionPainter oldDelegate) => false;
 }
 
 class BleTerminalPage extends StatefulWidget {
@@ -468,6 +620,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
       try {
         await FlutterBluePlus.startScan(
           withServices: [_serviceId],
+          webOptionalServices: [_serviceId],
           timeout: const Duration(seconds: 8),
         );
         await FlutterBluePlus.isScanning.where((value) => !value).first;
@@ -553,7 +706,12 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
                 throw TimeoutException('기기 코드 $code에 해당하는 ESP32를 찾지 못했습니다.'),
           );
       await FlutterBluePlus.startScan(
-        withServices: [_serviceId],
+        // On web, an exact name filter keeps the browser chooser tied to the
+        // code read from the QR label. The service is requested separately so
+        // GATT discovery remains authorized after the user selects the device.
+        withServices: kIsWeb ? const [] : [_serviceId],
+        withNames: kIsWeb ? ['ESP32-P-$code'] : const [],
+        webOptionalServices: [_serviceId],
         timeout: const Duration(seconds: 12),
       );
       final result = await matchingDevice;

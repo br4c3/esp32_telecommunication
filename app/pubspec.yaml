@@ -68,6 +68,7 @@ flutter:
 
   assets:
     - assets/images/cushion.png
+    - assets/images/google_g.png
 
   # To add assets to your application, add an assets section, like this:
   # assets:
