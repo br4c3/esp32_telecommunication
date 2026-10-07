@@ -10,6 +10,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'firebase_options.dart';
 import 'firebase_web_registration.dart';
@@ -777,12 +778,29 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
   bool _posturePopupOpen = false;
   int _selectedTab = 0;
   final List<PostureHistorySample> _postureHistory = [];
-  DateTime? _lastHistorySampleAt;
+  final Map<String, DailyPostureRecord> _dailyHistory = {};
+  SharedPreferencesAsync? _preferences;
+  Timer? _historySaveTimer;
+  Timer? _historyRecordTimer;
+  late DateTime _selectedHistoryDate;
+  DateTime? _lastPressureFrameAt;
+  PostureAssessment? _latestPostureAssessment;
   List<double> _pressures = List<double>.filled(5, 0);
 
   @override
   void initState() {
     super.initState();
+    _selectedHistoryDate = DateUtils.dateOnly(DateTime.now());
+    try {
+      _preferences = SharedPreferencesAsync();
+      _loadDailyHistory();
+      _historyRecordTimer = Timer.periodic(
+        const Duration(seconds: 1),
+        (_) => _recordDailyHistoryTick(),
+      );
+    } catch (error) {
+      debugPrint('자세 기록 저장소 준비 오류: $error');
+    }
     _scanSubscription = FlutterBluePlus.onScanResults.listen(
       (results) {
         if (!mounted) return;
@@ -821,6 +839,85 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
     } catch (error) {
       _reportBluetoothError(error, 'Bluetooth 권한을 확인할 수 없습니다.');
     }
+  }
+
+  String get _historyStorageKey =>
+      'seat_care_posture_history_v1_${kIsWeb ? FirebaseAuth.instance.currentUser?.uid ?? 'web' : 'local'}';
+
+  String _dateKey(DateTime date) =>
+      '${date.year.toString().padLeft(4, '0')}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
+
+  Future<void> _loadDailyHistory() async {
+    try {
+      final encoded = await _preferences?.getString(_historyStorageKey);
+      if (encoded == null) return;
+      final decoded = jsonDecode(encoded);
+      if (decoded is! Map<String, dynamic>) return;
+      final records = <String, DailyPostureRecord>{};
+      for (final entry in decoded.entries) {
+        if (entry.value is Map<String, dynamic>) {
+          records[entry.key] = DailyPostureRecord.fromJson(entry.value);
+        }
+      }
+      if (mounted) setState(() => _dailyHistory.addAll(records));
+    } catch (error) {
+      debugPrint('자세 기록 불러오기 오류: $error');
+    }
+  }
+
+  void _scheduleDailyHistorySave() {
+    _historySaveTimer?.cancel();
+    _historySaveTimer = Timer(const Duration(seconds: 5), _saveDailyHistory);
+  }
+
+  Future<void> _saveDailyHistory() async {
+    final preferences = _preferences;
+    if (preferences == null) return;
+    final cutoff = DateTime.now().subtract(const Duration(days: 90));
+    _dailyHistory.removeWhere((key, _) {
+      final date = DateTime.tryParse(key);
+      return date != null && date.isBefore(cutoff);
+    });
+    final encoded = jsonEncode(
+      _dailyHistory.map((key, value) => MapEntry(key, value.toJson())),
+    );
+    try {
+      await preferences.setString(_historyStorageKey, encoded);
+    } catch (error) {
+      debugPrint('자세 기록 저장 오류: $error');
+    }
+  }
+
+  void _recordDailyHistoryTick() {
+    final now = DateTime.now();
+    final assessment = _latestPostureAssessment;
+    final hasFreshSensorData =
+        _isConnected &&
+        _calibrationStatus == CalibrationStatus.ready &&
+        _lastPressureFrameAt != null &&
+        now.difference(_lastPressureFrameAt!) < const Duration(seconds: 2);
+    final key = _dateKey(now);
+    final record = _dailyHistory.putIfAbsent(
+      key,
+      () => DailyPostureRecord.empty(key),
+    );
+    if (hasFreshSensorData && assessment != null) {
+      record.addAssessment(assessment, now.hour);
+      if (assessment.lean != PostureLean.notSeated) {
+        _postureHistory.add(
+          PostureHistorySample(
+            recordedAt: now,
+            lateral: assessment.lateral,
+            longitudinal: assessment.longitudinal,
+          ),
+        );
+        if (_postureHistory.length > 300) _postureHistory.removeAt(0);
+      }
+    } else {
+      record.addUnavailable(now.hour);
+    }
+    _scheduleDailyHistorySave();
+    if (mounted && _selectedTab == 2) setState(() {});
   }
 
   Future<bool> _requestPermissions() async {
@@ -883,8 +980,18 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
                 autofocus: true,
                 textCapitalization: TextCapitalization.characters,
                 maxLength: 6,
+                style: const TextStyle(
+                  color: AppColors.ink,
+                  fontSize: 20,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: 2,
+                ),
                 decoration: InputDecoration(
-                  labelText: '예: 01CC9C',
+                  labelText: '6자리 기기 코드',
+                  hintText: '01CC9C',
+                  filled: true,
+                  fillColor: Colors.white,
+                  prefixIcon: const Icon(Icons.numbers_rounded),
                   errorText: validationMessage,
                 ),
                 onSubmitted: (_) {
@@ -995,7 +1102,6 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
       _isConnecting = true;
       _connectionStage = 'ESP32에 연결을 요청하고 있어요';
       _postureHistory.clear();
-      _lastHistorySampleAt = null;
     });
     try {
       await FlutterBluePlus.stopScan();
@@ -1171,22 +1277,8 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
     final assessment = PostureAnalyzer.assess(frame.values);
     final now = DateTime.now();
     var warning = _postureWarning;
-
-    if (_calibrationStatus == CalibrationStatus.ready &&
-        assessment.lean != PostureLean.notSeated &&
-        (_lastHistorySampleAt == null ||
-            now.difference(_lastHistorySampleAt!) >=
-                const Duration(seconds: 1))) {
-      _lastHistorySampleAt = now;
-      _postureHistory.add(
-        PostureHistorySample(
-          recordedAt: now,
-          lateral: assessment.lateral,
-          longitudinal: assessment.longitudinal,
-        ),
-      );
-      if (_postureHistory.length > 300) _postureHistory.removeAt(0);
-    }
+    _latestPostureAssessment = assessment;
+    _lastPressureFrameAt = now;
 
     if (_calibrationStatus != CalibrationStatus.ready ||
         assessment.lean == PostureLean.center ||
@@ -1361,6 +1453,9 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
     _connectionSubscription?.cancel();
     _notificationSubscription?.cancel();
     _calibrationTimeout?.cancel();
+    _historyRecordTimer?.cancel();
+    _historySaveTimer?.cancel();
+    unawaited(_saveDailyHistory());
     _device?.disconnect();
     super.dispose();
   }
@@ -1369,7 +1464,8 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
   Widget build(BuildContext context) {
     final pageTitle = switch (_selectedTab) {
       1 => '기기 연결',
-      2 => '설정',
+      2 => '자세 기록',
+      3 => '설정',
       _ => 'ESP32 압력 모니터',
     };
     return Scaffold(
@@ -1401,24 +1497,29 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              _StatusCard(
-                connected: _isConnected,
-                connecting:
-                    _isConnecting || (_isScanning && _connectionStage != null),
-                deviceName: _device?.platformName,
-                connectionStage: _connectionStage,
-                onDisconnect: _isConnected ? _disconnect : null,
-              ),
-              if (_error != null) ...[
-                const SizedBox(height: 12),
-                _ErrorNotice(
-                  message: _error!,
-                  onDismiss: () => setState(() => _error = null),
+              if (_selectedTab < 2) ...[
+                _StatusCard(
+                  connected: _isConnected,
+                  connecting:
+                      _isConnecting ||
+                      (_isScanning && _connectionStage != null),
+                  deviceName: _device?.platformName,
+                  connectionStage: _connectionStage,
+                  onDisconnect: _isConnected ? _disconnect : null,
                 ),
+                if (_error != null) ...[
+                  const SizedBox(height: 12),
+                  _ErrorNotice(
+                    message: _error!,
+                    onDismiss: () => setState(() => _error = null),
+                  ),
+                ],
+                const SizedBox(height: 20),
               ],
-              const SizedBox(height: 20),
-              if (_selectedTab == 2) ...[
+              if (_selectedTab == 3) ...[
                 Expanded(child: _buildSettingsTab(context)),
+              ] else if (_selectedTab == 2) ...[
+                Expanded(child: _buildHistoryTab(context)),
               ] else if (_selectedTab == 1 && _isConnected) ...[
                 Expanded(child: _buildConnectedDeviceTab(context)),
               ] else if (!_isConnected) ...[
@@ -1498,16 +1599,22 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
                     ),
                     const SizedBox(width: 8),
                     SizedBox(
-                      width: 52,
+                      width: 112,
                       height: 52,
-                      child: OutlinedButton(
+                      child: OutlinedButton.icon(
                         onPressed: _isScanning || _isConnecting
                             ? null
                             : _enterDeviceCode,
                         style: OutlinedButton.styleFrom(
-                          padding: EdgeInsets.zero,
+                          backgroundColor: Colors.white,
+                          foregroundColor: AppColors.ink,
+                          padding: const EdgeInsets.symmetric(horizontal: 10),
                         ),
-                        child: const Icon(Icons.keyboard_alt_outlined),
+                        icon: const Icon(Icons.keyboard_alt_outlined, size: 19),
+                        label: const Text(
+                          '직접 입력',
+                          style: TextStyle(fontWeight: FontWeight.w800),
+                        ),
                       ),
                     ),
                   ],
@@ -1517,7 +1624,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      TextButton.icon(
+                      OutlinedButton.icon(
                         onPressed: _isScanning ? null : _scanDeviceCode,
                         icon: const Icon(
                           Icons.qr_code_scanner_rounded,
@@ -1525,7 +1632,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
                         ),
                         label: const Text('다시 스캔'),
                       ),
-                      TextButton.icon(
+                      OutlinedButton.icon(
                         onPressed: _isScanning
                             ? null
                             : () => setState(() {
@@ -1594,33 +1701,6 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
                     Text(
-                      '최근 자세 기록',
-                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                    const Text(
-                      '최근 5분 · 1초 간격',
-                      style: TextStyle(
-                        color: Color(0xff7a7f8d),
-                        fontSize: 11,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                SizedBox(
-                  height: 150,
-                  child: PostureHistoryChart(
-                    samples: List.unmodifiable(_postureHistory),
-                  ),
-                ),
-                const SizedBox(height: 14),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(
                       '방석 압력 분포',
                       style: Theme.of(context).textTheme.titleMedium?.copyWith(
                         fontWeight: FontWeight.w800,
@@ -1655,6 +1735,11 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
             icon: Icon(Icons.bluetooth_outlined),
             selectedIcon: Icon(Icons.bluetooth_connected_rounded),
             label: '기기',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.insights_outlined),
+            selectedIcon: Icon(Icons.insights_rounded),
+            label: '기록',
           ),
           NavigationDestination(
             icon: Icon(Icons.settings_outlined),
@@ -1705,6 +1790,139 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
       ),
     ],
   );
+
+  Widget _buildHistoryTab(BuildContext context) {
+    final record = _dailyHistory[_dateKey(_selectedHistoryDate)];
+    final today = DateUtils.dateOnly(DateTime.now());
+    final isToday = DateUtils.isSameDay(_selectedHistoryDate, today);
+    String duration(int seconds) {
+      if (seconds < 60) return '$seconds초';
+      final hours = seconds ~/ 3600;
+      final minutes = (seconds % 3600) ~/ 60;
+      return hours > 0 ? '$hours시간 $minutes분' : '$minutes분';
+    }
+
+    return ListView(
+      children: [
+        Row(
+          children: [
+            IconButton.outlined(
+              onPressed: () => setState(
+                () => _selectedHistoryDate = _selectedHistoryDate.subtract(
+                  const Duration(days: 1),
+                ),
+              ),
+              icon: const Icon(Icons.chevron_left_rounded),
+              tooltip: '이전 날짜',
+            ),
+            Expanded(
+              child: Column(
+                children: [
+                  Text(
+                    '${_selectedHistoryDate.year}년 ${_selectedHistoryDate.month}월 ${_selectedHistoryDate.day}일',
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  Text(
+                    isToday
+                        ? '오늘'
+                        : _weekdayLabel(_selectedHistoryDate.weekday),
+                    style: const TextStyle(
+                      color: Color(0xff747987),
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            IconButton.outlined(
+              onPressed: isToday
+                  ? null
+                  : () => setState(
+                      () => _selectedHistoryDate = _selectedHistoryDate.add(
+                        const Duration(days: 1),
+                      ),
+                    ),
+              icon: const Icon(Icons.chevron_right_rounded),
+              tooltip: '다음 날짜',
+            ),
+          ],
+        ),
+        const SizedBox(height: 14),
+        if (record == null || record.totalSeconds == 0) ...[
+          const SizedBox(height: 80),
+          const Icon(
+            Icons.event_busy_rounded,
+            size: 56,
+            color: Color(0xff8a8f9d),
+          ),
+          const SizedBox(height: 14),
+          const Text(
+            '이 날짜에는 기록이 없어요',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900),
+          ),
+          const SizedBox(height: 6),
+          const Text(
+            '센서값이 없더라도 앱이 실행 중이면\n미측정 시간으로 기록됩니다.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Color(0xff747987), height: 1.45),
+          ),
+        ] else ...[
+          _PostureScoreCard(
+            score: record.postureScore,
+            sampleCount: record.measuredSeconds,
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: _HealthMetricCard(
+                  icon: Icons.accessibility_new_rounded,
+                  label: '바른 자세',
+                  value: duration(record.centered),
+                  color: const Color(0xff00a67e),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: _HealthMetricCard(
+                  icon: Icons.timer_outlined,
+                  label: '전체 기록',
+                  value: duration(record.totalSeconds),
+                  color: const Color(0xff2764d7),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 18),
+          Text(
+            '자세 균형',
+            style: Theme.of(
+              context,
+            ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900),
+          ),
+          const SizedBox(height: 8),
+          DailyPostureDistribution(record: record),
+          const SizedBox(height: 18),
+          Text(
+            '시간대별 자세 흐름',
+            style: Theme.of(
+              context,
+            ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900),
+          ),
+          const SizedBox(height: 8),
+          SizedBox(height: 190, child: DailyPostureBarChart(record: record)),
+          const SizedBox(height: 18),
+          const _HistoryHintCard(),
+        ],
+      ],
+    );
+  }
+
+  String _weekdayLabel(int weekday) =>
+      const ['월요일', '화요일', '수요일', '목요일', '금요일', '토요일', '일요일'][weekday - 1];
 
   Widget _buildSettingsTab(BuildContext context) => ListView(
     children: [
@@ -2588,6 +2806,431 @@ class PostureHistorySample {
   final double longitudinal;
 }
 
+class HourlyPostureBucket {
+  HourlyPostureBucket({
+    this.centered = 0,
+    this.left = 0,
+    this.right = 0,
+    this.front = 0,
+    this.back = 0,
+    this.away = 0,
+    this.unavailable = 0,
+  });
+
+  int centered;
+  int left;
+  int right;
+  int front;
+  int back;
+  int away;
+  int unavailable;
+
+  int get measured => centered + left + right + front + back;
+  int get total => measured + away + unavailable;
+  int get score => measured == 0 ? 0 : (centered * 100 / measured).round();
+
+  Map<String, int> toJson() => {
+    'centered': centered,
+    'left': left,
+    'right': right,
+    'front': front,
+    'back': back,
+    'away': away,
+    'unavailable': unavailable,
+  };
+
+  factory HourlyPostureBucket.fromJson(Map<String, dynamic> json) =>
+      HourlyPostureBucket(
+        centered: json['centered'] as int? ?? 0,
+        left: json['left'] as int? ?? 0,
+        right: json['right'] as int? ?? 0,
+        front: json['front'] as int? ?? 0,
+        back: json['back'] as int? ?? 0,
+        away: json['away'] as int? ?? 0,
+        unavailable: json['unavailable'] as int? ?? 0,
+      );
+}
+
+class DailyPostureRecord {
+  DailyPostureRecord({required this.dateKey, required this.hours});
+
+  factory DailyPostureRecord.empty(String dateKey) => DailyPostureRecord(
+    dateKey: dateKey,
+    hours: List.generate(24, (_) => HourlyPostureBucket()),
+  );
+
+  factory DailyPostureRecord.fromJson(Map<String, dynamic> json) {
+    final rawHours = json['hours'];
+    final hours = <HourlyPostureBucket>[];
+    if (rawHours is List) {
+      for (final item in rawHours.take(24)) {
+        hours.add(
+          item is Map<String, dynamic>
+              ? HourlyPostureBucket.fromJson(item)
+              : HourlyPostureBucket(),
+        );
+      }
+    }
+    while (hours.length < 24) {
+      hours.add(HourlyPostureBucket());
+    }
+    return DailyPostureRecord(
+      dateKey: json['dateKey'] as String? ?? '',
+      hours: hours,
+    );
+  }
+
+  final String dateKey;
+  final List<HourlyPostureBucket> hours;
+
+  int get centered => hours.fold(0, (sum, hour) => sum + hour.centered);
+  int get left => hours.fold(0, (sum, hour) => sum + hour.left);
+  int get right => hours.fold(0, (sum, hour) => sum + hour.right);
+  int get front => hours.fold(0, (sum, hour) => sum + hour.front);
+  int get back => hours.fold(0, (sum, hour) => sum + hour.back);
+  int get away => hours.fold(0, (sum, hour) => sum + hour.away);
+  int get unavailable => hours.fold(0, (sum, hour) => sum + hour.unavailable);
+  int get measuredSeconds => centered + left + right + front + back;
+  int get totalSeconds => measuredSeconds + away + unavailable;
+  int get postureScore =>
+      measuredSeconds == 0 ? 0 : (centered * 100 / measuredSeconds).round();
+
+  void addAssessment(PostureAssessment assessment, int hour) {
+    final bucket = hours[hour.clamp(0, 23)];
+    switch (assessment.lean) {
+      case PostureLean.center:
+        bucket.centered++;
+      case PostureLean.left:
+        bucket.left++;
+      case PostureLean.right:
+        bucket.right++;
+      case PostureLean.front:
+        bucket.front++;
+      case PostureLean.back:
+        bucket.back++;
+      case PostureLean.notSeated:
+        bucket.away++;
+    }
+  }
+
+  void addUnavailable(int hour) {
+    hours[hour.clamp(0, 23)].unavailable++;
+  }
+
+  Map<String, dynamic> toJson() => {
+    'dateKey': dateKey,
+    'hours': hours.map((hour) => hour.toJson()).toList(growable: false),
+  };
+}
+
+class _PostureScoreCard extends StatelessWidget {
+  const _PostureScoreCard({required this.score, required this.sampleCount});
+
+  final int score;
+  final int sampleCount;
+
+  @override
+  Widget build(BuildContext context) => Card(
+    color: AppColors.ink,
+    child: Padding(
+      padding: const EdgeInsets.all(20),
+      child: Row(
+        children: [
+          SizedBox.square(
+            dimension: 76,
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                CircularProgressIndicator(
+                  value: score / 100,
+                  strokeWidth: 9,
+                  backgroundColor: Colors.white24,
+                  color: score >= 80
+                      ? const Color(0xff38d39f)
+                      : AppColors.corporateYellow,
+                ),
+                Center(
+                  child: Text(
+                    '$score',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 25,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 18),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  '오늘의 자세 점수',
+                  style: TextStyle(color: Colors.white70, fontSize: 12),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  score >= 80
+                      ? '좋은 자세를 유지했어요'
+                      : score >= 60
+                      ? '조금만 더 중심을 잡아보세요'
+                      : '자세 교정이 필요해요',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 17,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 5),
+                Text(
+                  '유효 측정 $sampleCount초 기준',
+                  style: const TextStyle(color: Colors.white54, fontSize: 11),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+class _HealthMetricCard extends StatelessWidget {
+  const _HealthMetricCard({
+    required this.icon,
+    required this.label,
+    required this.value,
+    required this.color,
+  });
+
+  final IconData icon;
+  final String label;
+  final String value;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) => Card(
+    child: Padding(
+      padding: const EdgeInsets.all(14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, color: color),
+          const SizedBox(height: 10),
+          Text(
+            label,
+            style: const TextStyle(color: Color(0xff747987), fontSize: 11),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            value,
+            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+class DailyPostureDistribution extends StatelessWidget {
+  const DailyPostureDistribution({super.key, required this.record});
+
+  final DailyPostureRecord record;
+
+  @override
+  Widget build(BuildContext context) {
+    final entries = <(String, int, Color)>[
+      ('정자세', record.centered, const Color(0xff00a67e)),
+      ('왼쪽', record.left, const Color(0xff2764d7)),
+      ('오른쪽', record.right, const Color(0xff6c8ee3)),
+      ('앞쪽', record.front, const Color(0xffe16b32)),
+      ('뒤쪽', record.back, const Color(0xffe7a04c)),
+      ('자리 비움', record.away, const Color(0xffa58bcd)),
+      ('미측정', record.unavailable, const Color(0xffb7b8b3)),
+    ];
+    final total = math.max(1, record.totalSeconds);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: SizedBox(
+                height: 18,
+                child: Row(
+                  children: entries
+                      .where((entry) => entry.$2 > 0)
+                      .map(
+                        (entry) => Expanded(
+                          flex: entry.$2,
+                          child: ColoredBox(color: entry.$3),
+                        ),
+                      )
+                      .toList(),
+                ),
+              ),
+            ),
+            const SizedBox(height: 14),
+            Wrap(
+              spacing: 14,
+              runSpacing: 9,
+              children: entries.map((entry) {
+                final percent = (entry.$2 * 100 / total).round();
+                return _DistributionLegend(
+                  color: entry.$3,
+                  label: entry.$1,
+                  value: '$percent%',
+                );
+              }).toList(),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _DistributionLegend extends StatelessWidget {
+  const _DistributionLegend({
+    required this.color,
+    required this.label,
+    required this.value,
+  });
+
+  final Color color;
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      Container(
+        width: 9,
+        height: 9,
+        decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+      ),
+      const SizedBox(width: 5),
+      Text('$label $value', style: const TextStyle(fontSize: 11)),
+    ],
+  );
+}
+
+class DailyPostureBarChart extends StatelessWidget {
+  const DailyPostureBarChart({super.key, required this.record});
+
+  final DailyPostureRecord record;
+
+  @override
+  Widget build(BuildContext context) => Card(
+    margin: EdgeInsets.zero,
+    child: Padding(
+      padding: const EdgeInsets.fromLTRB(12, 14, 12, 10),
+      child: CustomPaint(
+        painter: _DailyPostureBarPainter(record),
+        size: Size.infinite,
+      ),
+    ),
+  );
+}
+
+class _DailyPostureBarPainter extends CustomPainter {
+  const _DailyPostureBarPainter(this.record);
+
+  final DailyPostureRecord record;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    const left = 28.0;
+    const bottom = 20.0;
+    final chart = Rect.fromLTWH(
+      left,
+      4,
+      size.width - left - 2,
+      size.height - bottom - 4,
+    );
+    final gridPaint = Paint()
+      ..color = const Color(0xffdeded8)
+      ..strokeWidth = 1;
+    for (final value in const [0, 50, 100]) {
+      final y = chart.bottom - chart.height * value / 100;
+      canvas.drawLine(Offset(chart.left, y), Offset(chart.right, y), gridPaint);
+      _paintChartLabel(canvas, '$value', Offset(2, y - 6));
+    }
+    final slot = chart.width / 24;
+    for (var hour = 0; hour < 24; hour++) {
+      final bucket = record.hours[hour];
+      final score = bucket.score;
+      final height = bucket.measured == 0 ? 5.0 : chart.height * score / 100;
+      final color = bucket.measured == 0
+          ? const Color(0xffb7b8b3)
+          : score >= 80
+          ? const Color(0xff00a67e)
+          : score >= 60
+          ? const Color(0xffffc928)
+          : const Color(0xffe16b32);
+      final rect = RRect.fromRectAndRadius(
+        Rect.fromLTWH(
+          chart.left + slot * hour + slot * .18,
+          chart.bottom - height,
+          slot * .64,
+          height,
+        ),
+        const Radius.circular(2),
+      );
+      canvas.drawRRect(rect, Paint()..color = color);
+    }
+    for (final hour in const [0, 6, 12, 18, 24]) {
+      final x = chart.left + chart.width * hour / 24;
+      _paintChartLabel(canvas, '$hour시', Offset(x - 8, chart.bottom + 5));
+    }
+  }
+
+  void _paintChartLabel(Canvas canvas, String text, Offset offset) {
+    final painter = TextPainter(
+      text: TextSpan(
+        text: text,
+        style: const TextStyle(fontSize: 9, color: Color(0xff747987)),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    painter.paint(canvas, offset);
+  }
+
+  @override
+  bool shouldRepaint(covariant _DailyPostureBarPainter oldDelegate) => true;
+}
+
+class _HistoryHintCard extends StatelessWidget {
+  const _HistoryHintCard();
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.all(14),
+    decoration: BoxDecoration(
+      color: const Color(0xffeef3fb),
+      borderRadius: BorderRadius.circular(8),
+    ),
+    child: const Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(Icons.info_outline_rounded, color: Color(0xff2764d7)),
+        SizedBox(width: 10),
+        Expanded(
+          child: Text(
+            '막대가 높고 초록색일수록 해당 시간대에 정자세를 잘 유지한 것입니다. 회색은 센서값이 없던 시간입니다.',
+            style: TextStyle(height: 1.45, color: Color(0xff48566b)),
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
 class PostureHistoryChart extends StatelessWidget {
   const PostureHistoryChart({super.key, required this.samples});
 
@@ -2811,9 +3454,9 @@ class PressureField {
     Offset(.675, .675), // R2 (27, 27)
     Offset(.500, .850), // C1 (20, 34)
   ];
-  static const double _sigma = .34;
-  static const double _regularization = .002;
-  static final Map<String, List<List<double>>> _projectionCache = {};
+  // 방석은 경계가 서로 연결된 표면이 아닙니다. 각 센서의 압력은
+  // 주변의 제한된 반경으로만 퍼지게 해 반대쪽 모서리로 래핑되는 보간 오류를 막습니다.
+  static const double _influenceRadius = .48;
 
   static List<List<double>> interpolate(
     List<double> sensorValues, {
@@ -2826,109 +3469,28 @@ class PressureField {
       sensorPositions.length,
       (index) => index < sensorValues.length ? sensorValues[index] : 0,
     );
-    final projection = _projection(rows, columns);
-
     return List<List<double>>.generate(rows, (row) {
       return List<double>.generate(columns, (column) {
-        final coefficients = projection[row * columns + column];
-        var estimate = 0.0;
+        final y = (row + .5) / rows;
+        final x = (column + .5) / columns;
+        var remainingIntensity = 1.0;
         for (var index = 0; index < sensorPositions.length; index++) {
-          estimate += coefficients[index] * values[index];
+          final dx = x - sensorPositions[index].dx;
+          final dy = y - sensorPositions[index].dy;
+          final distance = math.sqrt(dx * dx + dy * dy);
+          final influence = _compactInfluence(distance);
+          final sensorIntensity = (values[index] / maximum).clamp(0.0, 1.0);
+          remainingIntensity *= 1 - sensorIntensity * influence;
         }
-        return estimate.clamp(0.0, maximum);
+        return ((1 - remainingIntensity) * maximum).clamp(0.0, maximum);
       });
     });
   }
 
-  static List<List<double>> _projection(int rows, int columns) {
-    final key = 'regular:$rows:$columns';
-    final cached = _projectionCache[key];
-    if (cached != null) return cached;
-
-    final size = sensorPositions.length;
-    final kernelMatrix = List<List<double>>.generate(
-      size,
-      (row) => List<double>.generate(size, (column) {
-        final value = _kernel(
-          sensorPositions[row].dx - sensorPositions[column].dx,
-          sensorPositions[row].dy - sensorPositions[column].dy,
-        );
-        return row == column ? value + _regularization : value;
-      }),
-    );
-    final inverse = List<List<double>>.generate(
-      size,
-      (_) => List<double>.filled(size, 0),
-    );
-    for (var column = 0; column < size; column++) {
-      final basis = List<double>.filled(size, 0)..[column] = 1;
-      final solution = _solve(kernelMatrix, basis);
-      for (var row = 0; row < size; row++) {
-        inverse[row][column] = solution[row];
-      }
-    }
-
-    final result = List<List<double>>.generate(rows * columns, (flatIndex) {
-      final row = flatIndex ~/ columns;
-      final column = flatIndex % columns;
-      final y = (row + .5) / rows;
-      final x = (column + .5) / columns;
-      final sampleKernel = List<double>.generate(
-        size,
-        (index) => _kernel(
-          x - sensorPositions[index].dx,
-          y - sensorPositions[index].dy,
-        ),
-      );
-      return List<double>.generate(size, (output) {
-        var coefficient = 0.0;
-        for (var input = 0; input < size; input++) {
-          coefficient += sampleKernel[input] * inverse[input][output];
-        }
-        return coefficient;
-      });
-    });
-    _projectionCache[key] = result;
-    return result;
-  }
-
-  static double _kernel(double dx, double dy) {
-    final distanceSquared = dx * dx + dy * dy;
-    return math.exp(-distanceSquared / (2 * _sigma * _sigma));
-  }
-
-  static List<double> _solve(List<List<double>> matrix, List<double> vector) {
-    final size = vector.length;
-    final augmented = List<List<double>>.generate(
-      size,
-      (row) => [...matrix[row], vector[row]],
-    );
-
-    for (var pivot = 0; pivot < size; pivot++) {
-      var bestRow = pivot;
-      for (var row = pivot + 1; row < size; row++) {
-        if (augmented[row][pivot].abs() > augmented[bestRow][pivot].abs()) {
-          bestRow = row;
-        }
-      }
-      final temporary = augmented[pivot];
-      augmented[pivot] = augmented[bestRow];
-      augmented[bestRow] = temporary;
-
-      final divisor = augmented[pivot][pivot];
-      if (divisor.abs() < 1e-12) continue;
-      for (var column = pivot; column <= size; column++) {
-        augmented[pivot][column] /= divisor;
-      }
-      for (var row = 0; row < size; row++) {
-        if (row == pivot) continue;
-        final factor = augmented[row][pivot];
-        for (var column = pivot; column <= size; column++) {
-          augmented[row][column] -= factor * augmented[pivot][column];
-        }
-      }
-    }
-    return List<double>.generate(size, (row) => augmented[row][size]);
+  static double _compactInfluence(double distance) {
+    if (distance >= _influenceRadius) return 0;
+    final normalized = distance / _influenceRadius;
+    return .5 * (1 + math.cos(math.pi * normalized));
   }
 }
 

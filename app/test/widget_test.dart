@@ -47,6 +47,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('기기 코드 직접 입력'), findsOneWidget);
     expect(find.text('코드 적용'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
   });
 
   testWidgets('bottom navigation opens device settings', (tester) async {
@@ -54,12 +55,19 @@ void main() {
 
     expect(find.text('홈'), findsOneWidget);
     expect(find.text('기기'), findsOneWidget);
+    expect(find.text('기록'), findsOneWidget);
     expect(find.text('설정'), findsOneWidget);
+
+    await tester.tap(find.text('기록'));
+    await tester.pumpAndSettle();
+    expect(find.text('자세 기록'), findsOneWidget);
+    expect(find.text('이 날짜에는 기록이 없어요'), findsOneWidget);
 
     await tester.tap(find.text('설정'));
     await tester.pumpAndSettle();
     expect(find.text('정자세 다시 보정'), findsOneWidget);
     expect(find.text('권한 안내'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
   });
 
   test('parses a five-sensor pressure packet', () {
@@ -97,37 +105,45 @@ void main() {
     expect(PostureAnalyzer.assess([5, 5, 5, 5, 5]).lean, PostureLean.notSeated);
   });
 
-  testWidgets('renders five-minute posture history as a time series', (
-    tester,
-  ) async {
-    final now = DateTime(2026, 10, 8, 12);
+  test('stores measured and unavailable posture in daily summaries', () {
+    final record = DailyPostureRecord.empty('2026-10-08');
+    record.addAssessment(const PostureAssessment(PostureLean.center, 0), 9);
+    record.addAssessment(const PostureAssessment(PostureLean.left, .3), 9);
+    record.addUnavailable(10);
+
+    final restored = DailyPostureRecord.fromJson(record.toJson());
+    expect(restored.centered, 1);
+    expect(restored.left, 1);
+    expect(restored.unavailable, 1);
+    expect(restored.totalSeconds, 3);
+    expect(restored.postureScore, 50);
+  });
+
+  testWidgets('renders readable daily posture charts', (tester) async {
+    final record = DailyPostureRecord.empty('2026-10-08');
+    record.addAssessment(const PostureAssessment(PostureLean.center, 0), 9);
+    record.addAssessment(const PostureAssessment(PostureLean.right, .4), 10);
+    record.addUnavailable(11);
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
-          body: SizedBox(
-            width: 400,
-            height: 180,
-            child: PostureHistoryChart(
-              samples: [
-                PostureHistorySample(
-                  recordedAt: now.subtract(const Duration(minutes: 1)),
-                  lateral: -.25,
-                  longitudinal: .1,
-                ),
-                PostureHistorySample(
-                  recordedAt: now,
-                  lateral: .15,
-                  longitudinal: -.3,
-                ),
-              ],
-            ),
+          body: Column(
+            children: [
+              DailyPostureDistribution(record: record),
+              SizedBox(
+                width: 400,
+                height: 190,
+                child: DailyPostureBarChart(record: record),
+              ),
+            ],
           ),
         ),
       ),
     );
 
-    expect(find.text('좌우'), findsOneWidget);
-    expect(find.text('앞뒤'), findsOneWidget);
+    expect(find.textContaining('정자세'), findsOneWidget);
+    expect(find.textContaining('오른쪽'), findsOneWidget);
+    expect(find.textContaining('미측정'), findsOneWidget);
     expect(find.byType(CustomPaint), findsWidgets);
   });
 
@@ -199,6 +215,24 @@ void main() {
     expect(field.first, hasLength(12));
     expect(field[3][3], greaterThan(field[14][9]));
     expect(field.expand((row) => row).every((value) => value >= 0), isTrue);
+  });
+
+  test('pressure heat does not wrap to the opposite cushion edge', () {
+    final leftOnly = PressureField.interpolate(
+      [2400, 0, 0, 0, 0],
+      rows: 20,
+      columns: 20,
+    );
+    final rightOnly = PressureField.interpolate(
+      [0, 2400, 0, 0, 0],
+      rows: 20,
+      columns: 20,
+    );
+
+    expect(leftOnly[5][5], greaterThan(1000));
+    expect(leftOnly[5][19], 0);
+    expect(rightOnly[5][14], greaterThan(1000));
+    expect(rightOnly[5][0], 0);
   });
 
   testWidgets('pressure grid displays all five sensors', (tester) async {
