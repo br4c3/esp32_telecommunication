@@ -21,16 +21,16 @@ void main() {
 
   testWidgets('permission onboarding appears after login', (tester) async {
     await tester.pumpWidget(
-      MaterialApp(home: DevicePermissionGate(onReady: (_) {})),
+      MaterialApp(home: DevicePermissionGate(onReady: () {})),
     );
 
     expect(find.text('Seat Care 사용 권한'), findsOneWidget);
     expect(find.text('카메라 권한'), findsOneWidget);
     expect(find.text('알림 권한'), findsOneWidget);
-    expect(find.text('Bluetooth 권한'), findsOneWidget);
+    expect(find.text('Bluetooth 권한'), findsNothing);
     expect(find.text('카메라 허용'), findsOneWidget);
     expect(find.text('알림 허용'), findsOneWidget);
-    expect(find.text('ESP32 선택 및 연결'), findsOneWidget);
+    expect(find.text('권한 설정 완료 · QR 스캔으로 이동'), findsOneWidget);
   });
 
   testWidgets('shows disconnected terminal screen', (tester) async {
@@ -40,6 +40,11 @@ void main() {
     expect(find.text('연결되지 않음'), findsOneWidget);
     expect(find.text('기기 코드 스캔'), findsOneWidget);
     expect(find.text('압력 화면 테스트'), findsOneWidget);
+
+    await tester.tap(find.byIcon(Icons.keyboard_alt_outlined));
+    await tester.pumpAndSettle();
+    expect(find.text('기기 코드 직접 입력'), findsOneWidget);
+    expect(find.text('코드 적용'), findsOneWidget);
   });
 
   test('parses a five-sensor pressure packet', () {

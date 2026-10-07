@@ -246,40 +246,33 @@ class SignedInAccessGate extends StatefulWidget {
 }
 
 class _SignedInAccessGateState extends State<SignedInAccessGate> {
-  BluetoothDevice? _authorizedDevice;
+  bool _permissionsGranted = false;
 
   @override
   Widget build(BuildContext context) {
-    final device = _authorizedDevice;
-    if (device == null) {
+    if (!_permissionsGranted) {
       return DevicePermissionGate(
-        onReady: (selected) => setState(() => _authorizedDevice = selected),
+        onReady: () => setState(() => _permissionsGranted = true),
       );
     }
-    return BleTerminalPage(
-      requestBluetoothOnLaunch: false,
-      initialDevice: device,
-    );
+    return const BleTerminalPage(requestBluetoothOnLaunch: false);
   }
 }
 
 class DevicePermissionGate extends StatefulWidget {
   const DevicePermissionGate({super.key, required this.onReady});
 
-  final ValueChanged<BluetoothDevice> onReady;
+  final VoidCallback onReady;
 
   @override
   State<DevicePermissionGate> createState() => _DevicePermissionGateState();
 }
 
 class _DevicePermissionGateState extends State<DevicePermissionGate> {
-  static final Guid _serviceId = Guid('6E400001-B5A3-F393-E0A9-E50E24DCCA9E');
-
   bool _cameraGranted = false;
   bool _notificationGranted = false;
   bool _requestingCamera = false;
   bool _requestingNotification = false;
-  bool _requestingBluetooth = false;
   String? _error;
 
   Future<void> _requestCamera() async {
@@ -302,41 +295,6 @@ class _DevicePermissionGateState extends State<DevicePermissionGate> {
       }
     } finally {
       if (mounted) setState(() => _requestingCamera = false);
-    }
-  }
-
-  Future<void> _requestBluetooth() async {
-    setState(() {
-      _requestingBluetooth = true;
-      _error = null;
-    });
-    try {
-      final selectedDevice = FlutterBluePlus.onScanResults
-          .expand((results) => results)
-          .first
-          .timeout(const Duration(seconds: 20));
-      // This call must remain directly in the button handler. Browsers only
-      // grant Web Bluetooth access through a user-triggered device chooser.
-      await FlutterBluePlus.startScan(
-        withServices: [_serviceId],
-        webOptionalServices: [_serviceId],
-        timeout: const Duration(seconds: 20),
-      );
-      final result = await selectedDevice;
-      await FlutterBluePlus.stopScan();
-      if (mounted) widget.onReady(result.device);
-    } catch (error) {
-      await FlutterBluePlus.stopScan();
-      if (mounted) {
-        setState(() {
-          _error = bluetoothErrorMessage(
-            error,
-            fallback: 'ESP32 Bluetooth 권한을 받지 못했습니다. 전원을 확인하고 다시 시도해 주세요.',
-          );
-        });
-      }
-    } finally {
-      if (mounted) setState(() => _requestingBluetooth = false);
     }
   }
 
@@ -399,7 +357,7 @@ class _DevicePermissionGateState extends State<DevicePermissionGate> {
                     ),
                     const SizedBox(height: 8),
                     const Text(
-                      'QR 인식, 자세 알림, 방석 연결에 필요한 권한을 먼저 허용해 주세요.',
+                      'QR 인식과 자세 알림에 필요한 권한을 먼저 허용해 주세요.',
                       textAlign: TextAlign.center,
                       style: TextStyle(color: Color(0xff6f7482)),
                     ),
@@ -436,22 +394,6 @@ class _DevicePermissionGateState extends State<DevicePermissionGate> {
                           ? null
                           : _requestNotification,
                     ),
-                    const SizedBox(height: 12),
-                    _AccessStep(
-                      number: 3,
-                      icon: Icons.bluetooth_rounded,
-                      title: 'Bluetooth 권한',
-                      description: _notificationGranted
-                          ? '브라우저 목록에서 Seat Care ESP32를 선택하세요.'
-                          : '알림 권한을 먼저 허용해 주세요.',
-                      complete: false,
-                      buttonLabel: _requestingBluetooth
-                          ? '기기 선택 중…'
-                          : 'ESP32 선택 및 연결',
-                      onPressed: !_notificationGranted || _requestingBluetooth
-                          ? null
-                          : _requestBluetooth,
-                    ),
                     if (_error != null) ...[
                       const SizedBox(height: 14),
                       _ErrorNotice(
@@ -460,8 +402,19 @@ class _DevicePermissionGateState extends State<DevicePermissionGate> {
                       ),
                     ],
                     const SizedBox(height: 16),
+                    SizedBox(
+                      height: 50,
+                      child: FilledButton.icon(
+                        onPressed: _cameraGranted && _notificationGranted
+                            ? widget.onReady
+                            : null,
+                        icon: const Icon(Icons.qr_code_scanner_rounded),
+                        label: const Text('권한 설정 완료 · QR 스캔으로 이동'),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
                     const Text(
-                      '권한은 QR 인식, 자세 교정 알림, ESP32 통신에만 사용됩니다. 웹 Bluetooth는 기기를 선택해야 권한이 부여됩니다.',
+                      'Bluetooth 연결은 다음 화면에서 방석 QR을 스캔한 뒤 진행합니다.',
                       textAlign: TextAlign.center,
                       style: TextStyle(fontSize: 11, color: Color(0xff7a7f8d)),
                     ),
@@ -822,14 +775,9 @@ class _SeatCareCushionPainter extends CustomPainter {
 }
 
 class BleTerminalPage extends StatefulWidget {
-  const BleTerminalPage({
-    super.key,
-    required this.requestBluetoothOnLaunch,
-    this.initialDevice,
-  });
+  const BleTerminalPage({super.key, required this.requestBluetoothOnLaunch});
 
   final bool requestBluetoothOnLaunch;
-  final BluetoothDevice? initialDevice;
 
   @override
   State<BleTerminalPage> createState() => _BleTerminalPageState();
@@ -888,11 +836,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
       onError: (Object error) => _reportBluetoothError(error, '기기 검색에 실패했습니다.'),
     );
 
-    if (widget.initialDevice != null) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _connect(widget.initialDevice!);
-      });
-    } else if (widget.requestBluetoothOnLaunch) {
+    if (widget.requestBluetoothOnLaunch) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _requestBluetoothOnLaunch();
       });
@@ -931,67 +875,15 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
     return (await Permission.bluetooth.request()).isGranted;
   }
 
-  Future<void> _startScan() async {
-    setState(() => _error = null);
-
-    // Web Bluetooth must be started directly from the button's user gesture.
-    // Awaiting permission or adapter checks first makes browsers reject the
-    // chooser request even when Bluetooth is available.
-    if (kIsWeb) {
-      setState(() {
-        _devices.clear();
-        _isScanning = true;
-      });
-      try {
-        await FlutterBluePlus.startScan(
-          withServices: [_serviceId],
-          webOptionalServices: [_serviceId],
-          timeout: const Duration(seconds: 8),
-        );
-        await FlutterBluePlus.isScanning.where((value) => !value).first;
-      } catch (error) {
-        _reportBluetoothError(error, '기기 검색에 실패했습니다.');
-      } finally {
-        if (mounted) setState(() => _isScanning = false);
-      }
-      return;
-    }
-
-    if (!await _requestPermissions()) {
-      _showError('ESP32를 찾으려면 Bluetooth 권한이 필요합니다.');
-      return;
-    }
-
-    try {
-      final adapterState = await FlutterBluePlus.adapterState
-          .where((state) => state != BluetoothAdapterState.unknown)
-          .first;
-      if (adapterState != BluetoothAdapterState.on) {
-        _showError('Bluetooth를 켠 뒤 다시 검색해 주세요.');
-        return;
-      }
-      setState(() {
-        _devices.clear();
-        _isScanning = true;
-      });
-      await FlutterBluePlus.startScan(
-        withServices: [_serviceId],
-        timeout: const Duration(seconds: 8),
-      );
-      await FlutterBluePlus.isScanning.where((value) => !value).first;
-    } catch (error) {
-      _reportBluetoothError(error, '기기 검색에 실패했습니다.');
-    } finally {
-      if (mounted) setState(() => _isScanning = false);
-    }
-  }
-
   Future<void> _scanDeviceCode() async {
     final code = await Navigator.of(context).push<String>(
       MaterialPageRoute(builder: (_) => const DeviceCodeScannerPage()),
     );
     if (!mounted || code == null) return;
+    await _applyDeviceCode(code);
+  }
 
+  Future<void> _applyDeviceCode(String code) async {
     if (kIsWeb) {
       setState(() {
         _pendingDeviceCode = code;
@@ -1001,6 +893,69 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
     }
 
     await _connectToDeviceCode(code);
+  }
+
+  Future<void> _enterDeviceCode() async {
+    final controller = TextEditingController(text: _pendingDeviceCode ?? '');
+    String? validationMessage;
+    final code = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('기기 코드 직접 입력'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('QR 라벨에 표시된 6자리 코드를 입력하세요.'),
+              const SizedBox(height: 14),
+              TextField(
+                controller: controller,
+                autofocus: true,
+                textCapitalization: TextCapitalization.characters,
+                maxLength: 6,
+                decoration: InputDecoration(
+                  labelText: '예: 01CC9C',
+                  errorText: validationMessage,
+                ),
+                onSubmitted: (_) {
+                  final parsed = DeviceCode.parse(controller.text);
+                  if (parsed == null) {
+                    setDialogState(
+                      () => validationMessage = '영문 A–F와 숫자로 된 6자리를 입력해 주세요.',
+                    );
+                  } else {
+                    Navigator.of(dialogContext).pop(parsed);
+                  }
+                },
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('취소'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final parsed = DeviceCode.parse(controller.text);
+                if (parsed == null) {
+                  setDialogState(
+                    () => validationMessage = '영문 A–F와 숫자로 된 6자리를 입력해 주세요.',
+                  );
+                } else {
+                  Navigator.of(dialogContext).pop(parsed);
+                }
+              },
+              child: const Text('코드 적용'),
+            ),
+          ],
+        ),
+      ),
+    );
+    controller.dispose();
+    if (!mounted || code == null) return;
+    await _applyDeviceCode(code);
   }
 
   Future<void> _connectToDeviceCode(String code) async {
@@ -1495,7 +1450,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
                           ),
                           const SizedBox(height: 3),
                           Text(
-                            'ESP32의 전원이 켜져 있는지 확인하세요',
+                            '방석의 QR 코드를 스캔해 연결을 시작하세요',
                             style: Theme.of(context).textTheme.bodySmall
                                 ?.copyWith(color: const Color(0xff6f7482)),
                           ),
@@ -1563,19 +1518,42 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
                       child: OutlinedButton(
                         onPressed: _isScanning || _isConnecting
                             ? null
-                            : _startScan,
+                            : _enterDeviceCode,
                         style: OutlinedButton.styleFrom(
                           padding: EdgeInsets.zero,
                         ),
-                        child: const Icon(Icons.bluetooth_searching_rounded),
+                        child: const Icon(Icons.keyboard_alt_outlined),
                       ),
                     ),
                   ],
                 ),
                 if (_pendingDeviceCode != null) ...[
                   const SizedBox(height: 8),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      TextButton.icon(
+                        onPressed: _isScanning ? null : _scanDeviceCode,
+                        icon: const Icon(
+                          Icons.qr_code_scanner_rounded,
+                          size: 17,
+                        ),
+                        label: const Text('다시 스캔'),
+                      ),
+                      TextButton.icon(
+                        onPressed: _isScanning
+                            ? null
+                            : () => setState(() {
+                                _pendingDeviceCode = null;
+                                _error = null;
+                              }),
+                        icon: const Icon(Icons.restart_alt_rounded, size: 17),
+                        label: const Text('코드 초기화'),
+                      ),
+                    ],
+                  ),
                   Text(
-                    'QR 확인 완료 · 버튼을 눌러 같은 코드의 Bluetooth 기기를 선택하세요.',
+                    '코드 확인 완료 · 연결 버튼을 누르고 같은 ESP32를 선택하세요.',
                     textAlign: TextAlign.center,
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
                       color: const Color(0xff5f6470),
