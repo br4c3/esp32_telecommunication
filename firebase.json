@@ -1,5 +1,9 @@
 {
   "$schema": "https://raw.githubusercontent.com/firebase/firebase-tools/master/schema/firebase-config.json",
+  "functions": {
+    "source": "apps",
+    "runtime": "nodejs22"
+  },
   "auth": {
     "providers": {
       "googleSignIn": {
@@ -9,7 +13,7 @@
     }
   },
   "hosting": {
-    "public": "app/build/web",
+    "public": "apps/dist",
     "ignore": [
       "firebase.json",
       "**/.*",
@@ -17,8 +21,23 @@
     ],
     "rewrites": [
       {
+        "source": "/api/**",
+        "function": {
+          "functionId": "api",
+          "region": "asia-northeast3"
+        }
+      },
+      {
+        "source": "/admin{,/**}",
+        "destination": "/admin/index.html"
+      },
+      {
+        "source": "/user{,/**}",
+        "destination": "/user/index.html"
+      },
+      {
         "source": "**",
-        "destination": "/index.html"
+        "destination": "/user/index.html"
       }
     ],
     "headers": [

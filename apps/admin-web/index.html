@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta name="theme-color" content="#F5F2EB">
+  <title>Seat Care · 관리자</title>
+  <link rel="icon" href="/admin/src/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/admin/src/styles.css">
+  <script type="module" src="/admin/src/app.js"></script>
+</head>
+<body>
+  <a class="skip" href="#main">본문으로 건너뛰기</a>
+  <aside class="sidebar">
+    <a class="brand" href="/admin" aria-label="Seat Care 관리자 홈"><img src="/admin/src/icon.svg" width="32" height="32" alt=""><span>Seat Care<small>관리자</small></span></a>
+    <nav aria-label="주 메뉴">
+      <button class="nav-item active" data-page="overview" aria-current="page"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 10 9-7 9 7v10H3Z M9 20v-7h6v7"/></svg><span>현재 상태</span></button>
+      <button class="nav-item" data-page="records"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h10v4H7z M7 5H4v16h16V5h-3 M8 12h8 M8 16h5"/></svg><span>기록</span><span id="nav-count" class="count" hidden>0</span></button>
+      <button class="nav-item" data-page="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16 M4 17h16 M8 4v6 M16 14v6"/></svg><span>설정</span></button>
+    </nav>
+    <div class="sidebar-foot"><span class="status-dot"></span>사용자와 함께 살펴보는 시트</div>
+  </aside>
+  <div class="workspace">
+    <header class="topbar"><span>관리자 <span class="slash">/</span> <span id="breadcrumb">현재 상태</span></span><div class="top-actions"><span id="connection" class="connection" role="status">공유 연결 전</span><button id="refresh" class="icon-button" aria-label="새로고침" title="새로고침"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5 M4 17v-5h5 M5 8a8 8 0 0 1 13-3l2 3 M4 16l2 3a8 8 0 0 0 13-3"/></svg></button></div></header>
+    <main id="main" tabindex="-1">
+      <div id="demo-banner" class="banner demo-banner" hidden><span><strong>디자인 미리보기</strong> · 예시 데이터입니다. 실제 센서와 연결되어 있지 않아요.</span><button id="exit-demo">미리보기 종료</button></div>
+      <p id="error" class="banner error" role="alert" hidden></p>
+      <p id="notice" class="sr-only" role="status"></p>
+      <section id="join" class="join-panel">
+        <div><span class="eyebrow">공유 연결</span><h2>사용자의 방석을 연결해 주세요</h2><p>사용자 앱 설정에 표시된 코드를 입력하면 센서 상태와 기록을 확인할 수 있어요.</p></div>
+        <form id="join-form"><label class="sr-only" for="invite">사용자 코드</label><div class="join-input"><input id="invite" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" required minlength="16" maxlength="80" placeholder="사용자 코드 입력"><button class="primary" type="submit">연결하기</button></div><button id="preview" class="text-button" type="button">연결 없이 디자인 미리보기 <span aria-hidden="true">↗</span></button></form>
+      </section>
+      <section id="overview-page" class="page">
+        <div class="page-heading"><div><p class="eyebrow" id="today"></p><h1>현재 상태</h1><p>방석의 압력과 사용자의 안내 요청을 확인하세요.</p></div><span id="room-label" class="room-label">연결된 공유방 없음</span></div>
+        <div class="summary-grid">
+          <div class="summary"><span>방석 연결</span><strong id="summary-state">연결 대기</strong><small id="summary-device">사용자 앱에서 공유를 켜 주세요</small></div>
+          <div class="summary"><span>확인할 도움 요청</span><strong><span id="help-count">—</span><small>건</small></strong><button class="text-button" id="view-help">요청 살펴보기 <span aria-hidden="true">→</span></button></div>
+          <div class="summary"><span>공유된 완화 기록</span><strong><span id="completed">—</span><small>회</small></strong><small>공유된 기록 전체 기준</small></div>
+        </div>
+        <section class="panel notify-panel" aria-labelledby="overview-notify-title">
+          <div class="section-heading"><div><span class="direction-label">관리자 → 사용자</span><h2 id="overview-notify-title">사용자에게 알림 보내기</h2></div><span class="tag">최대 5초</span></div>
+          <p>연결된 사용자 앱 화면에 팝업 알림을 보냅니다.</p>
+          <form id="overview-notify-form" class="notify-form">
+            <label for="overview-notify-message">알림 내용</label>
+            <div class="preset-messages" aria-label="자세 알림 빠른 선택">
+              <button type="button" data-notify-message="왼쪽으로 치우쳐 있어요. 몸을 방석 중앙으로 옮겨 주세요.">왼쪽 치우침</button>
+              <button type="button" data-notify-message="오른쪽으로 치우쳐 있어요. 몸을 방석 중앙으로 옮겨 주세요.">오른쪽 치우침</button>
+              <button type="button" data-notify-message="앞쪽으로 치우쳐 있어요. 엉덩이를 뒤로 옮겨 주세요.">앞쪽 치우침</button>
+              <button type="button" data-notify-message="뒤쪽으로 치우쳐 있어요. 상체를 정자세로 세워 주세요.">뒤쪽 치우침</button>
+              <button type="button" data-notify-message="정자세를 잘 유지하고 있어요.">정자세</button>
+            </div>
+            <textarea id="overview-notify-message" maxlength="300" rows="3" required placeholder="사용자에게 전달할 내용을 입력하세요."></textarea>
+            <div><small id="overview-notify-count">0 / 300</small><button id="overview-notify-submit" class="primary" type="submit">사용자에게 알림 보내기</button></div>
+          </form>
+        </section>
+        <div class="monitor-grid">
+          <section class="panel pressure-panel"><div class="section-heading"><h2>압력 분포</h2><span id="data-kind" class="tag">수신 대기</span></div>
+            <div class="map"><span class="orientation">앞 · 무릎</span><div class="seat"><canvas id="map" width="240" height="300" role="img" aria-label="현재 센서값 없음"></canvas><div id="sensor-points"></div><span id="map-empty">센서 연결을 기다리고 있어요</span></div><span class="orientation">뒤 · 등받이</span></div>
+            <div class="legend"><span>낮음</span><i></i><span>높음</span></div><p class="map-caption">5개 센서로 표현한 상대 부하</p>
+            <details><summary>센서값 자세히 보기</summary><dl id="readings"></dl></details>
+          </section>
+          <div class="status-column">
+            <section class="panel current-panel"><div class="section-heading"><h2>지금 상태</h2><span id="state-mark" aria-hidden="true">—</span></div><h3 id="state-title">사용자 연결을 기다리고 있어요</h3><p id="guidance">공유가 시작되면 현재 상태가 여기에 표시돼요.</p><div class="reading-time"><span>마지막 측정</span><time id="last-reading">—</time></div></section>
+            <section class="panel request-panel"><div class="section-heading"><h2>확인할 요청</h2><button class="text-button" id="view-requests">전체 보기 <span aria-hidden="true">→</span></button></div><ol id="requests" class="event-list"><li class="empty">아직 공유된 요청이 없어요.</li></ol><p class="fine-print">확인은 요청을 읽었다는 기록이에요.<br>실제 도움 제공이나 압력 개선을 의미하지 않아요.</p></section>
+          </div>
+        </div>
+        <section class="panel recent-panel"><div class="section-heading"><h2>최근 기록</h2><button class="text-button" data-open-records>모두 보기 <span aria-hidden="true">→</span></button></div><ol id="recent-events" class="event-list"></ol></section>
+      </section>
+      <section id="records-page" class="page" hidden>
+        <div class="page-heading"><div><p class="eyebrow">공유 기록</p><h1>기록</h1><p>사용자 앱에서 공유한 안내와 수행 기록이에요.</p></div></div>
+        <section class="panel"><div class="record-tools"><div class="filters" role="group" aria-label="기록 종류"><button class="selected" data-filter="all" aria-pressed="true">전체</button><button data-filter="help" aria-pressed="false">도움 요청</button><button data-filter="alert" aria-pressed="false">압력 안내</button><button data-filter="relief" aria-pressed="false">완화 기록</button></div><label class="search-label"><span class="sr-only">기록 검색</span><input id="search" type="search" placeholder="기록 내용 검색"></label></div><p class="records-meta" id="records-meta">0개 기록</p><ol id="events" class="event-list full-events"></ol></section>
+      </section>
+      <section id="settings-page" class="page" hidden>
+        <div class="page-heading"><div><p class="eyebrow">관리자 환경</p><h1>설정</h1><p>공유 연결과 화면 표시를 관리하세요.</p></div></div>
+        <section class="panel settings-panel"><h2>공유 연결</h2><dl class="settings-list"><div><dt>연결 상태</dt><dd id="settings-connection">연결 전</dd></div><div><dt>방석</dt><dd id="settings-device">—</dd></div><div><dt>갱신 간격</dt><dd>5초</dd></div></dl><p>공유방 하나의 데이터를 보여줘요. 다른 사용자를 보려면 현재 연결을 종료하고 새 초대 링크를 입력하세요.</p><button id="disconnect" disabled>공유방 연결 종료</button></section>
+        <section class="panel settings-panel"><h2>사용자에게 알림 보내기</h2><p>사용자 앱이 열려 있고 같은 공유방에 연결되어 있으면 최대 5초 안에 화면 알림으로 표시돼요.</p><form id="notify-form" class="notify-form"><label for="notify-message">알림 내용</label><div class="preset-messages" aria-label="자세 알림 빠른 선택"><button type="button" data-notify-message="왼쪽으로 치우쳐 있어요. 몸을 방석 중앙으로 옮겨 주세요.">왼쪽 치우침</button><button type="button" data-notify-message="오른쪽으로 치우쳐 있어요. 몸을 방석 중앙으로 옮겨 주세요.">오른쪽 치우침</button><button type="button" data-notify-message="앞쪽으로 치우쳐 있어요. 엉덩이를 뒤로 옮겨 주세요.">앞쪽 치우침</button><button type="button" data-notify-message="뒤쪽으로 치우쳐 있어요. 상체를 정자세로 세워 주세요.">뒤쪽 치우침</button><button type="button" data-notify-message="정자세를 잘 유지하고 있어요.">정자세</button></div><textarea id="notify-message" maxlength="300" rows="3" required placeholder="사용자에게 전달할 내용을 입력하세요."></textarea><div><small id="notify-count">0 / 300</small><button id="notify-submit" class="primary" type="submit">사용자에게 알림 보내기</button></div></form></section>
+        <section class="panel settings-panel"><div class="setting-row"><div><h2>큰 글씨</h2><p>화면의 글씨를 더 크게 표시해요.</p></div><button id="text-size" role="switch" aria-checked="false" aria-label="큰 글씨"><span></span></button></div></section>
+        <section class="panel settings-panel"><h2>측정과 기록 안내</h2><p>최근 센서값이 15초 이상 지나면 현재 압력 표시를 멈춰요. 사용자 앱의 화면 잠금이나 연결 상태를 확인해 주세요.</p><p>최근 90일, 최대 2,000개의 공유 기록을 보관해요. 이 화면에서 연결을 종료해도 이미 공유된 서버 기록은 삭제되지 않아요.</p></section>
+      </section>
+      <footer>Seat Care <span>·</span> 상대 부하와 개인 기준 대비 변화를 표시합니다.</footer>
+    </main>
+  </div>
+</body>
+</html>

@@ -1,6 +1,6 @@
 import 'package:esp32_telecommunication/main.dart';
-import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
 void main() {
@@ -69,6 +69,10 @@ void main() {
     await tester.tap(find.text('설정'));
     await tester.pumpAndSettle();
     expect(find.text('정자세 다시 보정'), findsOneWidget);
+    expect(find.text('자세 알림 민감도'), findsOneWidget);
+    expect(find.text('낮음'), findsOneWidget);
+    expect(find.text('보통'), findsOneWidget);
+    expect(find.text('높음'), findsOneWidget);
     expect(find.text('권한 안내'), findsOneWidget);
     await tester.pumpWidget(const SizedBox.shrink());
   });
@@ -118,6 +122,10 @@ void main() {
       PostureLean.left,
     );
     expect(PostureAnalyzer.assess([5, 5, 5, 5, 5]).lean, PostureLean.notSeated);
+    expect(
+      PostureAnalyzer.assess([112, 88, 112, 88, 100]).lean,
+      PostureLean.left,
+    );
   });
 
   test('stores measured and unavailable posture in daily summaries', () {
@@ -339,17 +347,17 @@ void main() {
   ) async {
     await tester.pumpWidget(const MaterialApp(home: PressureDemoPage()));
 
-    expect(find.text('먼저 방석을 비워주세요'), findsOneWidget);
-    await tester.ensureVisible(find.text('1단계 · 5초 무부하 보정 시작'));
+    expect(find.text('방석을 비워 주세요'), findsOneWidget);
+    await tester.ensureVisible(find.text('빈 방석 측정하기'));
     await tester.pump();
-    await tester.tap(find.text('1단계 · 5초 무부하 보정 시작'));
+    await tester.tap(find.text('빈 방석 측정하기'));
     await tester.pump();
     expect(find.text('영점값을 측정하고 있어요'), findsOneWidget);
     await tester.pump(const Duration(seconds: 5));
 
-    expect(find.text('방석에 정자세로 앉아주세요'), findsOneWidget);
-    await tester.ensureVisible(find.text('2단계 · 5초 정자세 보정 시작'));
-    await tester.tap(find.text('2단계 · 5초 정자세 보정 시작'));
+    expect(find.text('편안하게 앉아 주세요'), findsOneWidget);
+    await tester.ensureVisible(find.text('앉은 자세 측정하기'));
+    await tester.tap(find.text('앉은 자세 측정하기'));
     await tester.pump();
     expect(find.text('정자세 압력을 측정하고 있어요'), findsOneWidget);
     await tester.pump(const Duration(seconds: 5));
@@ -379,15 +387,16 @@ void main() {
               onStartZero: () => started = true,
               onStartBalance: () {},
               onContinueWarning: () {},
+              onDisconnect: () {},
             ),
           ),
         ),
       ),
     );
 
-    expect(find.text('먼저 방석을 비워주세요'), findsOneWidget);
-    expect(find.text('1단계 · 5초 무부하 보정 시작'), findsOneWidget);
-    await tester.tap(find.text('1단계 · 5초 무부하 보정 시작'));
+    expect(find.text('방석을 비워 주세요'), findsOneWidget);
+    expect(find.text('빈 방석 측정하기'), findsOneWidget);
+    await tester.tap(find.text('빈 방석 측정하기'));
     expect(started, isTrue);
   });
 
@@ -406,16 +415,17 @@ void main() {
               onStartZero: () {},
               onStartBalance: () => started = true,
               onContinueWarning: () {},
+              onDisconnect: () {},
             ),
           ),
         ),
       ),
     );
 
-    expect(find.text('캘리브레이션 · 2 / 2'), findsOneWidget);
-    expect(find.text('방석에 정자세로 앉아주세요'), findsOneWidget);
-    expect(find.text('2단계 · 5초 정자세 보정 시작'), findsOneWidget);
-    await tester.tap(find.text('2단계 · 5초 정자세 보정 시작'));
+    expect(find.text('2 / 2'), findsOneWidget);
+    expect(find.text('편안하게 앉아 주세요'), findsOneWidget);
+    expect(find.text('앉은 자세 측정하기'), findsOneWidget);
+    await tester.tap(find.text('앉은 자세 측정하기'));
     expect(started, isTrue);
   });
 
@@ -435,6 +445,7 @@ void main() {
                 onStartZero: () {},
                 onStartBalance: () {},
                 onContinueWarning: () => continued = true,
+                onDisconnect: () {},
               ),
             ),
           ),

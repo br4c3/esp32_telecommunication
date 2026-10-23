@@ -69,3 +69,5 @@ vcpkg_installed/
 Testing/
 .cache/
 .firebase/
+apps/dist/
+apps/node_modules/

@@ -3,11 +3,12 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:firebase_core/firebase_core.dart';
+import 'package:http/http.dart' as http;
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -42,12 +43,12 @@ class _FirebaseBootstrapState extends State<FirebaseBootstrap> {
     future: _initialization,
     builder: (context, snapshot) {
       if (snapshot.hasError) {
-        return MaterialApp(
+        return const MaterialApp(
           debugShowCheckedModeBanner: false,
           home: Scaffold(
             body: Center(
               child: Padding(
-                padding: const EdgeInsets.all(24),
+                padding: EdgeInsets.all(24),
                 child: Text(
                   'Firebase 연결에 실패했습니다. 잠시 후 새로고침해 주세요.',
                   textAlign: TextAlign.center,
@@ -79,11 +80,38 @@ enum CalibrationStatus {
   ready,
 }
 
+enum AlertSensitivity {
+  low('낮음', 125, .14, .20, .50, Duration(seconds: 3)),
+  normal('보통', 100, .10, .15, .47, Duration(seconds: 2)),
+  high('높음', 80, .08, .12, .44, Duration(milliseconds: 1500))
+  ;
+
+  const AlertSensitivity(
+    this.label,
+    this.minimumPressure,
+    this.lateralThreshold,
+    this.longitudinalThreshold,
+    this.edgeThreshold,
+    this.holdDuration,
+  );
+
+  final String label;
+  final double minimumPressure;
+  final double lateralThreshold;
+  final double longitudinalThreshold;
+  final double edgeThreshold;
+  final Duration holdDuration;
+}
+
 abstract final class AppColors {
-  static const corporateYellow = Color(0xffffc928);
-  static const ink = Color(0xff202427);
-  static const canvas = Color(0xffe7e7e1);
-  static const surface = Color(0xfff1f1ec);
+  // Seat Care palette. Keeping it here lets the Firebase user and BLE domain
+  // remain unchanged.
+  static const corporateYellow = Color(0xff356b52);
+  static const ink = Color(0xff2c332d);
+  static const canvas = Color(0xfff5f2eb);
+  static const surface = Color(0xfffffdf8);
+  static const border = Color(0xffdedacf);
+  static const selected = Color(0xffe7efe6);
 }
 
 String bluetoothErrorMessage(Object error, {required String fallback}) {
@@ -116,23 +144,19 @@ String bluetoothErrorMessage(Object error, {required String fallback}) {
       message.contains('failed to connect')) {
     return 'ESP32와 Bluetooth 연결을 완료하지 못했습니다. 다른 앱의 연결을 끊고 ESP32 전원을 다시 켠 뒤 시도해 주세요.';
   }
-  if (message.contains('통신 서비스를 찾을 수 없습니다') ||
-      message.contains('송수신 채널을 찾을 수 없습니다')) {
+  if (message.contains('통신 서비스를 찾을 수 없습니다') || message.contains('송수신 채널을 찾을 수 없습니다')) {
     return 'ESP32 통신 채널을 찾지 못했습니다. Seat Care 펌웨어가 설치되어 있는지 확인해 주세요.';
   }
   return fallback;
 }
 
-String scannerErrorMessage(MobileScannerException error) =>
-    switch (error.errorCode) {
-      MobileScannerErrorCode.permissionDenied =>
-        '카메라 권한이 거부되었습니다. 브라우저 설정에서 카메라를 허용해 주세요.',
-      MobileScannerErrorCode.unsupported => '이 기기에서는 카메라 스캔을 지원하지 않습니다.',
-      MobileScannerErrorCode.controllerAlreadyInitialized ||
-      MobileScannerErrorCode.controllerInitializing =>
-        '카메라를 준비하고 있습니다. 잠시 후 다시 시도해 주세요.',
-      _ => '카메라를 시작할 수 없습니다. 권한과 카메라 상태를 확인해 주세요.',
-    };
+String scannerErrorMessage(MobileScannerException error) => switch (error.errorCode) {
+  MobileScannerErrorCode.permissionDenied => '카메라 권한이 거부되었습니다. 브라우저 설정에서 카메라를 허용해 주세요.',
+  MobileScannerErrorCode.unsupported => '이 기기에서는 카메라 스캔을 지원하지 않습니다.',
+  MobileScannerErrorCode.controllerAlreadyInitialized ||
+  MobileScannerErrorCode.controllerInitializing => '카메라를 준비하고 있습니다. 잠시 후 다시 시도해 주세요.',
+  _ => '카메라를 시작할 수 없습니다. 권한과 카메라 상태를 확인해 주세요.',
+};
 
 class Esp32App extends StatelessWidget {
   const Esp32App({super.key, this.requestBluetoothOnLaunch = true});
@@ -143,7 +167,7 @@ class Esp32App extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'ESP32 Terminal',
+      title: 'Seat Care',
       theme: ThemeData(
         colorScheme:
             ColorScheme.fromSeed(
@@ -152,64 +176,71 @@ class Esp32App extends StatelessWidget {
               surface: AppColors.surface,
             ).copyWith(
               primary: AppColors.corporateYellow,
-              onPrimary: AppColors.ink,
-              secondary: AppColors.ink,
+              onPrimary: Colors.white,
+              primaryContainer: AppColors.selected,
+              onPrimaryContainer: AppColors.corporateYellow,
+              secondary: AppColors.corporateYellow,
               onSecondary: Colors.white,
+              outline: AppColors.border,
+              surfaceTint: Colors.transparent,
             ),
         scaffoldBackgroundColor: AppColors.canvas,
         useMaterial3: true,
         cardTheme: CardThemeData(
           elevation: 0,
-          color: const Color(0xfff4f4ef),
+          color: AppColors.surface,
           margin: EdgeInsets.zero,
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(2),
-            side: const BorderSide(color: Color(0xffa9aaa5)),
+            borderRadius: BorderRadius.circular(12),
+            side: const BorderSide(color: AppColors.border),
           ),
         ),
         appBarTheme: const AppBarTheme(
           elevation: 0,
           centerTitle: false,
-          backgroundColor: AppColors.ink,
-          foregroundColor: Colors.white,
-          shape: Border(
-            bottom: BorderSide(color: AppColors.corporateYellow, width: 3),
-          ),
+          backgroundColor: AppColors.canvas,
+          foregroundColor: AppColors.ink,
+          surfaceTintColor: Colors.transparent,
+        ),
+        navigationBarTheme: const NavigationBarThemeData(
+          backgroundColor: AppColors.canvas,
+          indicatorColor: AppColors.selected,
+          surfaceTintColor: Colors.transparent,
         ),
         filledButtonTheme: FilledButtonThemeData(
           style: FilledButton.styleFrom(
             backgroundColor: AppColors.corporateYellow,
-            foregroundColor: AppColors.ink,
+            foregroundColor: Colors.white,
             disabledBackgroundColor: const Color(0xffb8b5a6),
             disabledForegroundColor: const Color(0xff66645c),
             shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(2),
+              borderRadius: BorderRadius.circular(12),
             ),
           ),
         ),
         progressIndicatorTheme: const ProgressIndicatorThemeData(
           color: AppColors.corporateYellow,
-          linearTrackColor: Color(0xffc7c7bf),
+          linearTrackColor: AppColors.selected,
         ),
         outlinedButtonTheme: OutlinedButtonThemeData(
           style: OutlinedButton.styleFrom(
-            foregroundColor: const Color(0xff272b2e),
-            side: const BorderSide(color: Color(0xff55595b), width: 1.5),
+            foregroundColor: AppColors.corporateYellow,
+            side: const BorderSide(color: AppColors.border),
             shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(2),
+              borderRadius: BorderRadius.circular(12),
             ),
           ),
         ),
         inputDecorationTheme: InputDecorationTheme(
           filled: true,
-          fillColor: const Color(0xffdeded8),
+          fillColor: AppColors.surface,
           border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(2),
-            borderSide: const BorderSide(color: Color(0xff777975)),
+            borderRadius: BorderRadius.circular(12),
+            borderSide: const BorderSide(color: AppColors.border),
           ),
           enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(2),
-            borderSide: const BorderSide(color: Color(0xff777975)),
+            borderRadius: BorderRadius.circular(12),
+            borderSide: const BorderSide(color: AppColors.border),
           ),
         ),
       ),
@@ -348,8 +379,9 @@ class _DevicePermissionGateState extends State<DevicePermissionGate> {
                     Text(
                       'Seat Care 사용 권한',
                       textAlign: TextAlign.center,
-                      style: Theme.of(context).textTheme.headlineSmall
-                          ?.copyWith(fontWeight: FontWeight.w900),
+                      style: Theme.of(
+                        context,
+                      ).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w900),
                     ),
                     const SizedBox(height: 8),
                     const Text(
@@ -362,14 +394,10 @@ class _DevicePermissionGateState extends State<DevicePermissionGate> {
                       number: 1,
                       icon: Icons.qr_code_scanner_rounded,
                       title: '카메라 권한',
-                      description: _cameraGranted
-                          ? '허용 완료'
-                          : '방석의 QR 코드를 인식할 때 사용합니다.',
+                      description: _cameraGranted ? '허용 완료' : '방석의 QR 코드를 인식할 때 사용합니다.',
                       complete: _cameraGranted,
                       buttonLabel: _requestingCamera ? '요청 중…' : '카메라 허용',
-                      onPressed: _requestingCamera || _cameraGranted
-                          ? null
-                          : _requestCamera,
+                      onPressed: _requestingCamera || _cameraGranted ? null : _requestCamera,
                     ),
                     if (_error != null) ...[
                       const SizedBox(height: 14),
@@ -431,9 +459,7 @@ class _AccessStep extends StatelessWidget {
           children: [
             CircleAvatar(
               radius: 17,
-              backgroundColor: complete
-                  ? const Color(0xff00a67e)
-                  : AppColors.corporateYellow,
+              backgroundColor: complete ? const Color(0xff00a67e) : AppColors.corporateYellow,
               foregroundColor: complete ? Colors.white : AppColors.ink,
               child: complete
                   ? const Icon(Icons.check_rounded, size: 20)
@@ -478,8 +504,7 @@ class _LoginPageState extends State<LoginPage> {
     return switch (error.code) {
       'popup-closed-by-user' || 'cancelled-popup-request' => '로그인이 취소되었습니다.',
       'popup-blocked' => '브라우저에서 로그인 팝업을 허용해 주세요.',
-      'account-exists-with-different-credential' =>
-        '같은 이메일이 다른 로그인 방식으로 이미 가입되어 있습니다.',
+      'account-exists-with-different-credential' => '같은 이메일이 다른 로그인 방식으로 이미 가입되어 있습니다.',
       'operation-not-allowed' => 'Firebase Console에서 해당 로그인 제공자를 활성화해 주세요.',
       'too-many-requests' => '요청이 너무 많습니다. 잠시 후 다시 시도해 주세요.',
       _ => '로그인 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.',
@@ -535,8 +560,9 @@ class _LoginPageState extends State<LoginPage> {
                     Text(
                       'SEAT CARE',
                       textAlign: TextAlign.center,
-                      style: Theme.of(context).textTheme.headlineSmall
-                          ?.copyWith(fontWeight: FontWeight.w900),
+                      style: Theme.of(
+                        context,
+                      ).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w900),
                     ),
                     const SizedBox(height: 6),
                     const Text(
@@ -750,6 +776,7 @@ class BleTerminalPage extends StatefulWidget {
 }
 
 class _BleTerminalPageState extends State<BleTerminalPage> {
+  static const _configuredApiOrigin = String.fromEnvironment('SEAT_CARE_API_ORIGIN');
   static final Guid _serviceId = Guid('6E400001-B5A3-F393-E0A9-E50E24DCCA9E');
   static final Guid _rxId = Guid('6E400002-B5A3-F393-E0A9-E50E24DCCA9E');
   static final Guid _txId = Guid('6E400003-B5A3-F393-E0A9-E50E24DCCA9E');
@@ -784,6 +811,16 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
   bool _historyLoaded = false;
   Timer? _historySaveTimer;
   Timer? _historyRecordTimer;
+  Timer? _remoteNotificationTimer;
+  String? _remoteEndpoint;
+  String? _remoteToken;
+  String? _remoteRoom;
+  bool _remoteNotificationBusy = false;
+  bool _remotePopupOpen = false;
+  final Set<String> _seenRemoteNotifications = {};
+  final String _remoteSessionId = 'session-${DateTime.now().microsecondsSinceEpoch}';
+  int _remoteSequence = 0;
+  AlertSensitivity _alertSensitivity = AlertSensitivity.high;
   late DateTime _selectedHistoryDate;
   DateTime? _lastPressureFrameAt;
   PostureAssessment? _latestPostureAssessment;
@@ -797,6 +834,8 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
     try {
       _preferences = SharedPreferencesAsync();
       _loadDailyHistory();
+      _loadRemoteNotificationSettings();
+      _loadAlertSensitivity();
     } catch (error) {
       _historyLoaded = true;
       debugPrint('자세 기록 저장소 준비 오류: $error');
@@ -807,6 +846,10 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
       const Duration(seconds: 1),
       (_) => _recordDailyHistoryTick(),
     );
+    _remoteNotificationTimer = Timer.periodic(
+      const Duration(seconds: 5),
+      (_) => _pollRemoteNotifications(),
+    );
     _scanSubscription = FlutterBluePlus.onScanResults.listen(
       (results) {
         if (!mounted) return;
@@ -815,8 +858,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
             final name = result.advertisementData.advName.isNotEmpty
                 ? result.advertisementData.advName
                 : result.device.platformName;
-            final advertisesService = result.advertisementData.serviceUuids
-                .contains(_serviceId);
+            final advertisesService = result.advertisementData.serviceUuids.contains(_serviceId);
             if (DeviceCode.parse(name) != null ||
                 name == 'ESP32-Pressure-6' ||
                 name == 'ESP32-ADS1115' ||
@@ -849,6 +891,282 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
 
   String get _historyStorageKey =>
       'seat_care_posture_history_v1_${kIsWeb ? FirebaseAuth.instance.currentUser?.uid ?? 'web' : 'local'}';
+
+  String get _remoteStorageSuffix =>
+      kIsWeb ? FirebaseAuth.instance.currentUser?.uid ?? 'web' : 'local';
+
+  String get _remoteEndpointKey => 'seat_care_remote_endpoint_$_remoteStorageSuffix';
+  String get _remoteTokenKey => 'seat_care_remote_token_$_remoteStorageSuffix';
+  String get _remoteSeenKey => 'seat_care_remote_seen_$_remoteStorageSuffix';
+  String get _alertSensitivityKey => 'seat_care_alert_sensitivity_$_remoteStorageSuffix';
+  Uri get _apiBase => _configuredApiOrigin.isEmpty ? Uri.base : Uri.parse(_configuredApiOrigin);
+
+  Future<void> _loadAlertSensitivity() async {
+    try {
+      final saved = await _preferences?.getInt(_alertSensitivityKey);
+      if (!mounted || saved == null || saved < 0 || saved >= AlertSensitivity.values.length) return;
+      setState(() => _alertSensitivity = AlertSensitivity.values[saved]);
+    } catch (error) {
+      debugPrint('알림 민감도 불러오기 오류: $error');
+    }
+  }
+
+  Future<void> _setAlertSensitivity(AlertSensitivity value) async {
+    setState(() {
+      _alertSensitivity = value;
+      _leanCandidate = null;
+      _leanStartedAt = null;
+      _postureWarning = null;
+    });
+    try {
+      await _preferences?.setInt(_alertSensitivityKey, value.index);
+    } catch (error) {
+      debugPrint('알림 민감도 저장 오류: $error');
+    }
+  }
+
+  Future<void> _loadRemoteNotificationSettings() async {
+    final preferences = _preferences;
+    if (preferences == null) return;
+    try {
+      final endpoint = await preferences.getString(_remoteEndpointKey);
+      final token = await preferences.getString(_remoteTokenKey);
+      final seen = await preferences.getString(_remoteSeenKey);
+      if (!mounted) return;
+      setState(() {
+        _remoteEndpoint = endpoint;
+        _remoteToken = token;
+        _remoteRoom = token == null ? null : _workerRoomFromToken(token);
+        if (seen != null) {
+          _seenRemoteNotifications.addAll((jsonDecode(seen) as List).whereType<String>());
+        }
+      });
+      await _pollRemoteNotifications();
+    } catch (error) {
+      debugPrint('관리자 알림 설정 불러오기 오류: $error');
+    }
+  }
+
+  String _workerRoomFromToken(String token) {
+    final parts = token.split('.');
+    if (parts.length != 2) throw const FormatException('사용자용 초대 링크를 확인해 주세요.');
+    final data =
+        jsonDecode(
+              utf8.decode(base64Url.decode(base64Url.normalize(parts.first))),
+            )
+            as Map<String, dynamic>;
+    final room = data['room'];
+    if (data['role'] != 'worker' ||
+        room is! String ||
+        !RegExp(r'^[a-zA-Z0-9_-]{16,80}$').hasMatch(room)) {
+      throw const FormatException('사용자용 초대 링크를 확인해 주세요.');
+    }
+    return room;
+  }
+
+  Future<void> _saveRemoteSettings() async {
+    final preferences = _preferences;
+    if (preferences == null) return;
+    if (_remoteEndpoint == null || _remoteToken == null) {
+      await preferences.remove(_remoteEndpointKey);
+      await preferences.remove(_remoteTokenKey);
+      await preferences.remove(_remoteSeenKey);
+      return;
+    }
+    await preferences.setString(_remoteEndpointKey, _remoteEndpoint!);
+    await preferences.setString(_remoteTokenKey, _remoteToken!);
+    await preferences.setString(
+      _remoteSeenKey,
+      jsonEncode(_seenRemoteNotifications.toList().take(200).toList()),
+    );
+  }
+
+  Future<void> _pollRemoteNotifications() async {
+    if (_remoteNotificationBusy || _remoteEndpoint == null || _remoteToken == null) return;
+    _remoteNotificationBusy = true;
+    try {
+      final now = DateTime.now();
+      final hasFreshValues =
+          _isConnected &&
+          _calibrationStatus == CalibrationStatus.ready &&
+          _lastPressureFrameAt != null &&
+          now.difference(_lastPressureFrameAt!) < const Duration(seconds: 2);
+      final values = hasFreshValues
+          ? _pressures.take(5).map((value) => value.round().clamp(0, 65535)).toList(growable: false)
+          : null;
+      final quality = !hasFreshValues
+          ? 'unavailable'
+          : values!.fold<int>(0, (sum, value) => sum + value) < 80
+          ? 'unloaded'
+          : 'seated';
+      final response = await http
+          .post(
+            Uri.parse(_remoteEndpoint!),
+            headers: {
+              'Authorization': 'Bearer $_remoteToken',
+              'Content-Type': 'application/json',
+            },
+            body: jsonEncode({
+              'action': 'upload',
+              'version': 1,
+              'requestId': 'request-${DateTime.now().microsecondsSinceEpoch}',
+              'snapshot': {
+                'source': 'sensor',
+                'layoutId': 'seat-care-drawing-20261007-v2',
+                'sessionId': _remoteSessionId,
+                'sequence': ++_remoteSequence,
+                'at': now.millisecondsSinceEpoch,
+                'quality': quality,
+                'connected': hasFreshValues,
+                'device': _device?.platformName.isNotEmpty == true
+                    ? _device!.platformName
+                    : _isConnected
+                    ? 'Seat Care 방석'
+                    : '연결된 방석 없음',
+                'values': values,
+                'baseline': null,
+                'bias': const <String>[],
+              },
+              'events': const <Map<String, dynamic>>[],
+            }),
+          )
+          .timeout(const Duration(seconds: 12));
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+      if (response.statusCode != 200 || data['role'] != 'worker') {
+        throw StateError(data['error'] as String? ?? '사용자용 초대 링크를 확인해 주세요.');
+      }
+      final state = data['state'] as Map<String, dynamic>? ?? const {};
+      final notifications = (state['notifications'] as List? ?? const [])
+          .whereType<Map>()
+          .map((item) => Map<String, dynamic>.from(item))
+          .where((item) => item['id'] is String && item['message'] is String)
+          .toList();
+      final unseen = notifications
+          .where((item) => !_seenRemoteNotifications.contains(item['id']))
+          .toList();
+      if (unseen.isEmpty || !mounted) return;
+      _seenRemoteNotifications.addAll(unseen.map((item) => item['id'] as String));
+      await _saveRemoteSettings();
+      final latest = unseen.last;
+      if (!_remotePopupOpen && mounted) {
+        _remotePopupOpen = true;
+        await showDialog<void>(
+          context: context,
+          builder: (context) => AlertDialog(
+            icon: const Icon(Icons.notifications_active_outlined),
+            title: const Text('관리자 알림'),
+            content: Text(latest['message'] as String),
+            actions: [
+              FilledButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('확인'),
+              ),
+            ],
+          ),
+        );
+        _remotePopupOpen = false;
+      }
+    } catch (error) {
+      debugPrint('관리자 알림 확인 오류: $error');
+    } finally {
+      _remoteNotificationBusy = false;
+    }
+  }
+
+  Future<void> _configureRemoteNotifications() async {
+    String? errorMessage;
+    var busy = false;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('관리자 알림 연결'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                _remoteRoom == null
+                    ? '코드를 만들면 관리자 화면에서 바로 연결할 수 있습니다.'
+                    : '관리자 화면에 아래 사용자 코드를 입력하세요.',
+              ),
+              if (_remoteRoom != null) ...[
+                const SizedBox(height: 12),
+                SelectableText(
+                  _remoteRoom!,
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
+              ],
+              const SizedBox(height: 16),
+              if (errorMessage != null) ...[
+                const SizedBox(height: 10),
+                Text(errorMessage!, style: const TextStyle(color: Colors.red)),
+              ],
+            ],
+          ),
+          actions: [
+            if (_remoteToken != null)
+              TextButton(
+                onPressed: busy
+                    ? null
+                    : () async {
+                        _remoteEndpoint = null;
+                        _remoteToken = null;
+                        _remoteRoom = null;
+                        _seenRemoteNotifications.clear();
+                        await _saveRemoteSettings();
+                        if (dialogContext.mounted) Navigator.pop(dialogContext);
+                        if (mounted) setState(() {});
+                      },
+                child: const Text('연결 해제'),
+              ),
+            TextButton(
+              onPressed: busy ? null : () => Navigator.pop(dialogContext),
+              child: const Text('취소'),
+            ),
+            if (_remoteRoom == null)
+              FilledButton(
+                onPressed: busy
+                    ? null
+                    : () async {
+                        setDialogState(() => busy = true);
+                        try {
+                          final connectEndpoint = _apiBase.resolve('/api/user-connect');
+                          final response = await http.post(
+                            connectEndpoint,
+                            headers: {'Content-Type': 'application/json'},
+                            body: '{}',
+                          );
+                          final data = jsonDecode(response.body) as Map<String, dynamic>;
+                          if (response.statusCode != 200 ||
+                              data['token'] is! String ||
+                              data['room'] is! String) {
+                            throw StateError(data['error'] as String? ?? '사용자 코드를 만들지 못했어요.');
+                          }
+                          _remoteEndpoint = connectEndpoint.resolve('/api/telemetry').toString();
+                          _remoteToken = data['token'] as String;
+                          _remoteRoom = data['room'] as String;
+                          _seenRemoteNotifications.clear();
+                          await _saveRemoteSettings();
+                          if (dialogContext.mounted) Navigator.pop(dialogContext);
+                          if (mounted) setState(() {});
+                          await _pollRemoteNotifications();
+                        } catch (error) {
+                          setDialogState(() {
+                            errorMessage = error
+                                .toString()
+                                .replaceFirst('Bad state: ', '')
+                                .replaceFirst('FormatException: ', '');
+                            busy = false;
+                          });
+                        }
+                      },
+                child: Text(busy ? '만드는 중…' : '사용자 코드 만들기'),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
 
   String _dateKey(DateTime date) =>
       '${date.year.toString().padLeft(4, '0')}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
@@ -982,8 +1300,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
       final modernBluetoothAllowed =
           allowed(statuses[Permission.bluetoothScan]) &&
           allowed(statuses[Permission.bluetoothConnect]);
-      return modernBluetoothAllowed ||
-          allowed(statuses[Permission.locationWhenInUse]);
+      return modernBluetoothAllowed || allowed(statuses[Permission.locationWhenInUse]);
     }
     return (await Permission.bluetooth.request()).isGranted;
   }
@@ -1113,8 +1430,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
           })
           .timeout(
             const Duration(seconds: 12),
-            onTimeout: () =>
-                throw TimeoutException('기기 코드 $code에 해당하는 ESP32를 찾지 못했습니다.'),
+            onTimeout: () => throw TimeoutException('기기 코드 $code에 해당하는 ESP32를 찾지 못했습니다.'),
           );
       await FlutterBluePlus.startScan(
         // A service filter supports both current ESP32-P-xxxxxx advertising
@@ -1180,18 +1496,12 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
         await Future<void>.delayed(const Duration(milliseconds: 500));
         services = await device.discoverServices();
       }
-      final service = services
-          .where((item) => item.uuid == _serviceId)
-          .firstOrNull;
+      final service = services.where((item) => item.uuid == _serviceId).firstOrNull;
       if (service == null) {
         throw StateError('ESP32 통신 서비스를 찾을 수 없습니다.');
       }
-      _rxCharacteristic = service.characteristics
-          .where((item) => item.uuid == _rxId)
-          .firstOrNull;
-      final tx = service.characteristics
-          .where((item) => item.uuid == _txId)
-          .firstOrNull;
+      _rxCharacteristic = service.characteristics.where((item) => item.uuid == _rxId).firstOrNull;
+      final tx = service.characteristics.where((item) => item.uuid == _txId).firstOrNull;
       if (_rxCharacteristic == null || tx == null) {
         throw StateError('ESP32 송수신 채널을 찾을 수 없습니다.');
       }
@@ -1322,7 +1632,14 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
   }
 
   void _handlePressureFrame(PressureFrame frame) {
-    final assessment = PostureAnalyzer.assess(frame.values);
+    final sensitivity = _alertSensitivity;
+    final assessment = PostureAnalyzer.assess(
+      frame.values,
+      minimumTotalPressure: sensitivity.minimumPressure,
+      lateralLeanThreshold: sensitivity.lateralThreshold,
+      longitudinalLeanThreshold: sensitivity.longitudinalThreshold,
+      edgeLoadThreshold: sensitivity.edgeThreshold,
+    );
     final now = DateTime.now();
     var warning = _postureWarning;
     _latestPostureAssessment = assessment;
@@ -1340,9 +1657,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
     } else {
       final startedAt = _leanStartedAt;
       final lastNotification = _lastPostureNotificationAt;
-      final sustained =
-          startedAt != null &&
-          now.difference(startedAt) >= const Duration(seconds: 3);
+      final sustained = startedAt != null && now.difference(startedAt) >= sensitivity.holdDuration;
       final cooledDown =
           _lastNotifiedLean != assessment.lean ||
           lastNotification == null ||
@@ -1505,6 +1820,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
     _calibrationTimeout?.cancel();
     _historyRecordTimer?.cancel();
     _historySaveTimer?.cancel();
+    _remoteNotificationTimer?.cancel();
     unawaited(_saveDailyHistory());
     _device?.disconnect();
     super.dispose();
@@ -1549,9 +1865,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
               if (_selectedTab == 0) ...[
                 _StatusCard(
                   connected: _isConnected,
-                  connecting:
-                      _isConnecting ||
-                      (_isScanning && _connectionStage != null),
+                  connecting: _isConnecting || (_isScanning && _connectionStage != null),
                   deviceName: _device?.platformName,
                   connectionStage: _connectionStage,
                   onDisconnect: _isConnected ? _disconnect : null,
@@ -1578,14 +1892,16 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
                         children: [
                           Text(
                             '주변 기기',
-                            style: Theme.of(context).textTheme.titleLarge
-                                ?.copyWith(fontWeight: FontWeight.w800),
+                            style: Theme.of(
+                              context,
+                            ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w800),
                           ),
                           const SizedBox(height: 3),
                           Text(
                             '방석의 QR 코드를 스캔해 연결을 시작하세요',
-                            style: Theme.of(context).textTheme.bodySmall
-                                ?.copyWith(color: const Color(0xff6f7482)),
+                            style: Theme.of(
+                              context,
+                            ).textTheme.bodySmall?.copyWith(color: const Color(0xff6f7482)),
                           ),
                         ],
                       ),
@@ -1649,9 +1965,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
                       width: 112,
                       height: 52,
                       child: OutlinedButton.icon(
-                        onPressed: _isScanning || _isConnecting
-                            ? null
-                            : _enterDeviceCode,
+                        onPressed: _isScanning || _isConnecting ? null : _enterDeviceCode,
                         style: OutlinedButton.styleFrom(
                           backgroundColor: Colors.white,
                           foregroundColor: AppColors.ink,
@@ -1707,8 +2021,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
                       : ListView(
                           padding: const EdgeInsets.only(top: 4),
                           children: _devices.values.map((result) {
-                            final advertisedName =
-                                result.advertisementData.advName;
+                            final advertisedName = result.advertisementData.advName;
                             final name = advertisedName.isNotEmpty
                                 ? advertisedName
                                 : result.device.platformName.isEmpty
@@ -1735,6 +2048,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
                     onStartZero: _startZeroCalibration,
                     onStartBalance: _startBalanceCalibration,
                     onContinueWarning: _continueAfterCalibrationWarning,
+                    onDisconnect: _disconnect,
                   ),
                 ),
               ] else ...[
@@ -1829,8 +2143,7 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
                 label: label,
                 date: '${date.month}/${date.day}',
                 selected: selected,
-                hasRecord:
-                    (_dailyHistory[_dateKey(date)]?.totalSeconds ?? 0) > 0,
+                hasRecord: (_dailyHistory[_dateKey(date)]?.totalSeconds ?? 0) > 0,
                 onTap: () => setState(() => _selectedHistoryDate = date),
               );
             },
@@ -1967,15 +2280,27 @@ class _BleTerminalPageState extends State<BleTerminalPage> {
       _SettingsTile(
         icon: Icons.tune_rounded,
         title: '정자세 다시 보정',
-        description: _isConnected
-            ? '영점과 정자세 기준을 처음부터 다시 측정합니다.'
-            : '방석을 연결한 뒤 사용할 수 있습니다.',
+        description: _isConnected ? '영점과 정자세 기준을 처음부터 다시 측정합니다.' : '방석을 연결한 뒤 사용할 수 있습니다.',
         enabled: _isConnected,
         onTap: () => setState(() {
           _isFirstSetup = false;
           _calibrationStatus = CalibrationStatus.zeroRequired;
           _selectedTab = 0;
         }),
+      ),
+      const SizedBox(height: 10),
+      _AlertSensitivityCard(
+        value: _alertSensitivity,
+        onChanged: _setAlertSensitivity,
+      ),
+      const SizedBox(height: 10),
+      _SettingsTile(
+        icon: Icons.notifications_active_outlined,
+        title: '관리자 알림',
+        description: _remoteToken == null
+            ? '사용자 코드를 만들면 관리자가 보낸 알림을 받을 수 있습니다.'
+            : '사용자 코드: ${_remoteRoom ?? "확인 중"} · 눌러서 확인',
+        onTap: _configureRemoteNotifications,
       ),
       const SizedBox(height: 10),
       _SettingsTile(
@@ -2068,6 +2393,7 @@ class CalibrationPanel extends StatelessWidget {
     required this.onStartZero,
     required this.onStartBalance,
     required this.onContinueWarning,
+    required this.onDisconnect,
   });
 
   final CalibrationStatus status;
@@ -2075,6 +2401,7 @@ class CalibrationPanel extends StatelessWidget {
   final VoidCallback onStartZero;
   final VoidCallback onStartBalance;
   final VoidCallback onContinueWarning;
+  final VoidCallback onDisconnect;
 
   @override
   Widget build(BuildContext context) {
@@ -2084,8 +2411,7 @@ class CalibrationPanel extends StatelessWidget {
         status == CalibrationStatus.balanceCalibrating ||
         status == CalibrationStatus.balanceWarning;
     final warning =
-        status == CalibrationStatus.zeroWarning ||
-        status == CalibrationStatus.balanceWarning;
+        status == CalibrationStatus.zeroWarning || status == CalibrationStatus.balanceWarning;
     final calibrating =
         status == CalibrationStatus.zeroCalibrating ||
         status == CalibrationStatus.balanceCalibrating;
@@ -2096,12 +2422,12 @@ class CalibrationPanel extends StatelessWidget {
               ? '정자세 압력을 측정하고 있어요'
               : warning
               ? '센서 상태를 확인해 주세요'
-              : '방석에 정자세로 앉아주세요'
+              : '편안하게 앉아 주세요'
         : calibrating
         ? '영점값을 측정하고 있어요'
         : warning
         ? '센서 상태를 확인해 주세요'
-        : '먼저 방석을 비워주세요';
+        : '방석을 비워 주세요';
     final description = checking
         ? 'ESP32에 저장된 최초 보정 정보를 불러옵니다.'
         : balance
@@ -2109,160 +2435,152 @@ class CalibrationPanel extends StatelessWidget {
               ? '측정이 끝날 때까지 편안한 정자세를 유지하세요.'
               : warning
               ? '일부 센서 반응이 기준 범위를 벗어났습니다.'
-              : '평소 바르게 앉았다고 생각하는 자세를 기준으로 저장합니다.'
+              : '평소 자세로 앉아 5초간 유지해 주세요.'
         : calibrating
         ? '측정이 끝날 때까지 방석을 누르지 마세요.'
         : warning
         ? '일부 센서의 무부하 값이 기준 범위를 벗어났습니다.'
-        : '사람이나 물건이 없는 상태를 0점으로 설정합니다.';
-    final stepLabel = balance ? '캘리브레이션 · 2 / 2' : '캘리브레이션 · 1 / 2';
+        : '방석 위의 사람과 물건을 치워 주세요.';
+    final stepLabel = balance ? '2 / 2' : '1 / 2';
     return LayoutBuilder(
       builder: (context, constraints) => SingleChildScrollView(
         child: ConstrainedBox(
           constraints: BoxConstraints(minHeight: constraints.maxHeight),
           child: Center(
             child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 520),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 10,
-                      vertical: 5,
-                    ),
-                    decoration: BoxDecoration(
-                      color: AppColors.corporateYellow,
-                      borderRadius: BorderRadius.circular(2),
-                    ),
-                    child: Text(
-                      stepLabel,
-                      style: const TextStyle(
-                        color: AppColors.ink,
-                        fontSize: 11,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  Text(
-                    title,
-                    textAlign: TextAlign.center,
-                    style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                      fontWeight: FontWeight.w900,
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    description,
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(color: Color(0xff747987)),
-                  ),
-                  const SizedBox(height: 8),
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(12),
-                    child: Image.asset(
-                      'assets/images/cushion.png',
-                      height: 230,
-                      width: double.infinity,
-                      fit: BoxFit.contain,
-                    ),
-                  ),
-                  if (checking)
-                    const Padding(
-                      padding: EdgeInsets.symmetric(vertical: 24),
-                      child: CircularProgressIndicator(),
-                    )
-                  else if (calibrating)
-                    TweenAnimationBuilder<double>(
-                      tween: Tween(begin: 0, end: 1),
-                      duration: const Duration(seconds: 5),
-                      builder: (context, progress, _) => Column(
-                        children: [
-                          LinearProgressIndicator(
-                            value: progress,
-                            minHeight: 7,
+              constraints: const BoxConstraints(maxWidth: 620),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(20, 8, 20, 12),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Column(
+                      children: [
+                        Row(
+                          children: [
+                            const Icon(
+                              Icons.bluetooth_rounded,
+                              color: AppColors.corporateYellow,
+                            ),
+                            const SizedBox(width: 12),
+                            const Text(
+                              '방석 연결됨',
+                              style: TextStyle(
+                                color: Color(0xff656b61),
+                                fontSize: 16,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            const Spacer(),
+                            IconButton(
+                              onPressed: onDisconnect,
+                              tooltip: '방석 연결 해제',
+                              icon: const Icon(
+                                Icons.link_off_rounded,
+                                color: Color(0xff656b61),
+                              ),
+                            ),
+                          ],
+                        ),
+                        SizedBox(height: constraints.maxHeight * .13),
+                        Text(
+                          stepLabel,
+                          style: const TextStyle(
+                            color: Color(0xff656b61),
+                            fontSize: 17,
+                            fontWeight: FontWeight.w500,
                           ),
-                          const SizedBox(height: 9),
-                          Text(
-                            '${math.max(0, 5 - (progress * 5).floor())}초 남음',
-                            style: const TextStyle(
-                              fontWeight: FontWeight.w800,
-                              color: Color(0xff6b5100),
+                        ),
+                        const SizedBox(height: 12),
+                        Text(
+                          title,
+                          textAlign: TextAlign.center,
+                          style: Theme.of(context).textTheme.headlineLarge?.copyWith(
+                            color: AppColors.ink,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: -1.2,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        Text(
+                          description,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            color: Color(0xff656b61),
+                            fontSize: 17,
+                            height: 1.5,
+                          ),
+                        ),
+                        const SizedBox(height: 30),
+                        Image.asset(
+                          'assets/images/cushion.png',
+                          height: math.min(340, constraints.maxHeight * .34),
+                          width: double.infinity,
+                          fit: BoxFit.contain,
+                        ),
+                      ],
+                    ),
+                    Column(
+                      children: [
+                        if (checking)
+                          const Padding(
+                            padding: EdgeInsets.only(bottom: 20),
+                            child: CircularProgressIndicator(),
+                          )
+                        else if (calibrating)
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 18),
+                            child: TweenAnimationBuilder<double>(
+                              tween: Tween(begin: 0, end: 1),
+                              duration: const Duration(seconds: 5),
+                              builder: (context, progress, _) => Column(
+                                children: [
+                                  LinearProgressIndicator(value: progress, minHeight: 7),
+                                  const SizedBox(height: 8),
+                                  Text('${math.max(0, 5 - (progress * 5).floor())}초 남음'),
+                                ],
+                              ),
+                            ),
+                          )
+                        else if (warning)
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 18),
+                            child: _CalibrationWarning(
+                              sensors: warningSensors,
+                              isZeroWarning: status == CalibrationStatus.zeroWarning,
+                              onRetry: balance ? onStartBalance : onStartZero,
+                              onContinue: onContinueWarning,
                             ),
                           ),
-                        ],
-                      ),
-                    )
-                  else if (warning)
-                    _CalibrationWarning(
-                      sensors: warningSensors,
-                      isZeroWarning: status == CalibrationStatus.zeroWarning,
-                      onRetry: balance ? onStartBalance : onStartZero,
-                      onContinue: onContinueWarning,
-                    )
-                  else if (balance)
-                    const Column(
-                      children: [
-                        _CalibrationTip(
-                          icon: Icons.airline_seat_recline_normal_rounded,
-                          text: '방석 중앙에 앉아 허리와 골반을 바르게 세우세요.',
-                        ),
-                        SizedBox(height: 8),
-                        _CalibrationTip(
-                          icon: Icons.timer_outlined,
-                          text: '평소의 정자세를 잡고 시작 후 5초 동안 유지하세요.',
-                        ),
-                      ],
-                    )
-                  else
-                    const Column(
-                      children: [
-                        _CalibrationTip(
-                          icon: Icons.event_seat_outlined,
-                          text: '방석에서 일어나 압력을 완전히 제거하세요.',
-                        ),
-                        SizedBox(height: 8),
-                        _CalibrationTip(
-                          icon: Icons.timer_outlined,
-                          text: '시작 후 5초 동안 방석을 그대로 두세요.',
-                        ),
-                      ],
-                    ),
-                  const SizedBox(height: 16),
-                  if (!checking && !warning)
-                    SizedBox(
-                      width: double.infinity,
-                      height: 52,
-                      child: FilledButton.icon(
-                        onPressed: calibrating
-                            ? null
-                            : balance
-                            ? onStartBalance
-                            : onStartZero,
-                        icon: calibrating
-                            ? const SizedBox.square(
-                                dimension: 18,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
+                        if (!checking && !warning)
+                          SizedBox(
+                            width: double.infinity,
+                            height: 64,
+                            child: FilledButton(
+                              onPressed: calibrating
+                                  ? null
+                                  : balance
+                                  ? onStartBalance
+                                  : onStartZero,
+                              style: FilledButton.styleFrom(
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(16),
                                 ),
-                              )
-                            : Icon(
-                                balance
-                                    ? Icons.airline_seat_recline_normal_rounded
-                                    : Icons.tune_rounded,
                               ),
-                        label: Text(
-                          calibrating
-                              ? '보정 진행 중'
-                              : balance
-                              ? '2단계 · 5초 정자세 보정 시작'
-                              : '1단계 · 5초 무부하 보정 시작',
-                          style: const TextStyle(fontWeight: FontWeight.w800),
-                        ),
-                      ),
+                              child: Text(
+                                calibrating
+                                    ? '측정 중…'
+                                    : balance
+                                    ? '앉은 자세 측정하기'
+                                    : '빈 방석 측정하기',
+                                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+                              ),
+                            ),
+                          ),
+                      ],
                     ),
-                ],
+                  ],
+                ),
               ),
             ),
           ),
@@ -2289,17 +2607,14 @@ class _CalibrationWarning extends StatelessWidget {
   Widget build(BuildContext context) {
     final suspectedSensors = sensors
         .where(
-          (sensor) =>
-              sensor >= 1 && sensor <= PressureField.sensorLabels.length,
+          (sensor) => sensor >= 1 && sensor <= PressureField.sensorLabels.length,
         )
         .map((sensor) {
           final index = sensor - 1;
           return '${PressureField.sensorLabels[index]} · S$sensor · ${PressureField.sensorLocationNames[index]}';
         })
         .toList(growable: false);
-    final sensorLabel = suspectedSensors.isEmpty
-        ? '일부 센서'
-        : suspectedSensors.join(', ');
+    final sensorLabel = suspectedSensors.isEmpty ? '일부 센서' : suspectedSensors.join(', ');
     final message = isZeroWarning
         ? '영점값이 정상 범위를 벗어났습니다. 무부하 센서가 있어도 그냥 계속하시겠습니까?'
         : '하중이 감지되지 않았습니다. 무부하 센서가 있어도 그냥 계속하시겠습니까?';
@@ -2369,35 +2684,6 @@ class _CalibrationWarning extends StatelessWidget {
       ),
     );
   }
-}
-
-class _CalibrationTip extends StatelessWidget {
-  const _CalibrationTip({required this.icon, required this.text});
-
-  final IconData icon;
-  final String text;
-
-  @override
-  Widget build(BuildContext context) => Container(
-    padding: const EdgeInsets.all(11),
-    decoration: BoxDecoration(
-      color: Colors.white,
-      border: Border.all(color: const Color(0xffe1e3e8)),
-      borderRadius: BorderRadius.circular(2),
-    ),
-    child: Row(
-      children: [
-        Icon(icon, size: 20, color: const Color(0xff59606e)),
-        const SizedBox(width: 10),
-        Expanded(
-          child: Text(
-            text,
-            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-          ),
-        ),
-      ],
-    ),
-  );
 }
 
 class PressureDemoPage extends StatefulWidget {
@@ -2499,6 +2785,7 @@ class _PressureDemoPageState extends State<PressureDemoPage> {
               onStartZero: _startDemoCalibration,
               onStartBalance: _startDemoCalibration,
               onContinueWarning: () {},
+              onDisconnect: () => Navigator.of(context).pop(),
             ),
           ),
         ),
@@ -2554,9 +2841,7 @@ class _PressureDemoPageState extends State<PressureDemoPage> {
                     width: 8,
                     height: 8,
                     decoration: BoxDecoration(
-                      color: _isPlaying
-                          ? const Color(0xff00a67e)
-                          : const Color(0xff8a8f9d),
+                      color: _isPlaying ? const Color(0xff00a67e) : const Color(0xff8a8f9d),
                       shape: BoxShape.circle,
                     ),
                   ),
@@ -2588,9 +2873,7 @@ class _PressureDemoPageState extends State<PressureDemoPage> {
                     child: FilledButton.icon(
                       onPressed: _toggleAnimation,
                       icon: Icon(
-                        _isPlaying
-                            ? Icons.pause_rounded
-                            : Icons.play_arrow_rounded,
+                        _isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
                       ),
                       label: Text(_isPlaying ? '일시정지' : '재생'),
                     ),
@@ -2783,17 +3066,15 @@ class PostureAssessment {
 abstract final class PostureAnalyzer {
   static PostureAssessment assess(
     List<double> values, {
-    double minimumTotalPressure = 125,
-    double lateralLeanThreshold = .14,
-    double longitudinalLeanThreshold = .20,
-    double edgeLoadThreshold = .50,
+    double minimumTotalPressure = 80,
+    double lateralLeanThreshold = .08,
+    double longitudinalLeanThreshold = .12,
+    double edgeLoadThreshold = .44,
   }) {
     if (values.length != 5) {
       return const PostureAssessment(PostureLean.notSeated, 0);
     }
-    final normalized = values
-        .map((value) => math.max(0.0, value))
-        .toList(growable: false);
+    final normalized = values.map((value) => math.max(0.0, value)).toList(growable: false);
     final total = normalized.fold<double>(0, (sum, value) => sum + value);
     if (total < minimumTotalPressure) {
       return const PostureAssessment(PostureLean.notSeated, 0);
@@ -2810,9 +3091,7 @@ abstract final class PostureAnalyzer {
     final longitudinal = (front - back) / math.max(1, front + back);
     final leftEdgeShare = (normalized[0] + normalized[2]) / total;
     final rightEdgeShare = (normalized[1] + normalized[3]) / total;
-    final edgeLoaded =
-        leftEdgeShare >= edgeLoadThreshold ||
-        rightEdgeShare >= edgeLoadThreshold;
+    final edgeLoaded = leftEdgeShare >= edgeLoadThreshold || rightEdgeShare >= edgeLoadThreshold;
     final lateralLean = lateral.abs() >= lateralLeanThreshold || edgeLoaded;
     final longitudinalLean = longitudinal.abs() >= longitudinalLeanThreshold;
 
@@ -2824,11 +3103,8 @@ abstract final class PostureAnalyzer {
         longitudinal: longitudinal,
       );
     }
-    if (lateralLean &&
-        (!longitudinalLean || lateral.abs() >= longitudinal.abs())) {
-      final leansRight = edgeLoaded
-          ? rightEdgeShare > leftEdgeShare
-          : lateral > 0;
+    if (lateralLean && (!longitudinalLean || lateral.abs() >= longitudinal.abs())) {
+      final leansRight = edgeLoaded ? rightEdgeShare > leftEdgeShare : lateral > 0;
       return PostureAssessment(
         leansRight ? PostureLean.right : PostureLean.left,
         math.max(lateral.abs(), math.max(leftEdgeShare, rightEdgeShare)),
@@ -2890,16 +3166,15 @@ class HourlyPostureBucket {
     'unavailable': unavailable,
   };
 
-  factory HourlyPostureBucket.fromJson(Map<String, dynamic> json) =>
-      HourlyPostureBucket(
-        centered: json['centered'] as int? ?? 0,
-        left: json['left'] as int? ?? 0,
-        right: json['right'] as int? ?? 0,
-        front: json['front'] as int? ?? 0,
-        back: json['back'] as int? ?? 0,
-        away: json['away'] as int? ?? 0,
-        unavailable: json['unavailable'] as int? ?? 0,
-      );
+  factory HourlyPostureBucket.fromJson(Map<String, dynamic> json) => HourlyPostureBucket(
+    centered: json['centered'] as int? ?? 0,
+    left: json['left'] as int? ?? 0,
+    right: json['right'] as int? ?? 0,
+    front: json['front'] as int? ?? 0,
+    back: json['back'] as int? ?? 0,
+    away: json['away'] as int? ?? 0,
+    unavailable: json['unavailable'] as int? ?? 0,
+  );
 }
 
 class PressureTimelineFrame {
@@ -2909,8 +3184,7 @@ class PressureTimelineFrame {
   final List<int>? values;
   bool get isAvailable => values != null && values!.length >= 5;
 
-  List<int> toJson() =>
-      isAvailable ? [secondOfDay, ...values!.take(5)] : [secondOfDay, -1];
+  List<int> toJson() => isAvailable ? [secondOfDay, ...values!.take(5)] : [secondOfDay, -1];
 
   factory PressureTimelineFrame.fromJson(List<dynamic> json) {
     final second = json.isNotEmpty && json.first is num
@@ -2946,9 +3220,7 @@ class DailyPostureRecord {
     if (rawHours is List) {
       for (final item in rawHours.take(24)) {
         hours.add(
-          item is Map<String, dynamic>
-              ? HourlyPostureBucket.fromJson(item)
-              : HourlyPostureBucket(),
+          item is Map<String, dynamic> ? HourlyPostureBucket.fromJson(item) : HourlyPostureBucket(),
         );
       }
     }
@@ -2984,8 +3256,7 @@ class DailyPostureRecord {
   int get unavailable => hours.fold(0, (sum, hour) => sum + hour.unavailable);
   int get measuredSeconds => centered + left + right + front + back;
   int get totalSeconds => measuredSeconds + away + unavailable;
-  int get postureScore =>
-      measuredSeconds == 0 ? 0 : (centered * 100 / measuredSeconds).round();
+  int get postureScore => measuredSeconds == 0 ? 0 : (centered * 100 / measuredSeconds).round();
 
   void addAssessment(PostureAssessment assessment, int hour) {
     final bucket = hours[hour.clamp(0, 23)];
@@ -3010,8 +3281,7 @@ class DailyPostureRecord {
   }
 
   void addPressureFrame(PressureTimelineFrame frame) {
-    if (pressureFrames.isNotEmpty &&
-        pressureFrames.last.secondOfDay == frame.secondOfDay) {
+    if (pressureFrames.isNotEmpty && pressureFrames.last.secondOfDay == frame.secondOfDay) {
       pressureFrames[pressureFrames.length - 1] = frame;
       return;
     }
@@ -3019,11 +3289,7 @@ class DailyPostureRecord {
   }
 
   void mergeFrom(DailyPostureRecord newer) {
-    for (
-      var index = 0;
-      index < math.min(hours.length, newer.hours.length);
-      index++
-    ) {
+    for (var index = 0; index < math.min(hours.length, newer.hours.length); index++) {
       final target = hours[index];
       final source = newer.hours[index];
       target.centered += source.centered;
@@ -3051,9 +3317,7 @@ class DailyPostureRecord {
     'dateKey': dateKey,
     'hours': hours.map((hour) => hour.toJson()).toList(growable: false),
     if (pressureFrames.isNotEmpty)
-      'pressureFrames': pressureFrames
-          .map((frame) => frame.toJson())
-          .toList(growable: false),
+      'pressureFrames': pressureFrames.map((frame) => frame.toJson()).toList(growable: false),
   };
 }
 
@@ -3107,9 +3371,7 @@ class _HistoryDateCard extends StatelessWidget {
               height: 5,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: hasRecord
-                    ? AppColors.corporateYellow
-                    : Colors.transparent,
+                color: hasRecord ? AppColors.corporateYellow : Colors.transparent,
               ),
             ),
           ],
@@ -3141,9 +3403,7 @@ class _PostureScoreCard extends StatelessWidget {
                   value: score / 100,
                   strokeWidth: 9,
                   backgroundColor: Colors.white24,
-                  color: score >= 80
-                      ? const Color(0xff38d39f)
-                      : AppColors.corporateYellow,
+                  color: score >= 80 ? const Color(0xff38d39f) : AppColors.corporateYellow,
                 ),
                 Center(
                   child: Text(
@@ -3421,9 +3681,7 @@ class _TimelapseEntryCard extends StatelessWidget {
               width: 50,
               height: 50,
               decoration: BoxDecoration(
-                color: onOpen == null
-                    ? const Color(0xffecece8)
-                    : const Color(0xfffff2bd),
+                color: onOpen == null ? const Color(0xffecece8) : const Color(0xfffff2bd),
                 borderRadius: BorderRadius.circular(12),
               ),
               child: Icon(
@@ -3445,9 +3703,7 @@ class _TimelapseEntryCard extends StatelessWidget {
                   ),
                   const SizedBox(height: 3),
                   Text(
-                    onOpen == null
-                        ? '새로 측정되는 압력부터 5초 간격으로 저장됩니다.'
-                        : '$frameCount개 프레임 · 5초 간격',
+                    onOpen == null ? '새로 측정되는 압력부터 5초 간격으로 저장됩니다.' : '$frameCount개 프레임 · 5초 간격',
                     style: const TextStyle(
                       color: Color(0xff747987),
                       fontSize: 12,
@@ -3549,9 +3805,7 @@ class _PressureTimelapsePageState extends State<PressureTimelapsePage> {
     final pressures = frame.isAvailable
         ? frame.values!.map((value) => value.toDouble()).toList(growable: false)
         : List<double>.filled(5, 0);
-    final assessment = frame.isAvailable
-        ? PostureAnalyzer.assess(pressures)
-        : null;
+    final assessment = frame.isAvailable ? PostureAnalyzer.assess(pressures) : null;
     return Scaffold(
       appBar: AppBar(title: const Text('압력 타임랩스')),
       body: SafeArea(
@@ -3626,9 +3880,7 @@ class _PressureTimelapsePageState extends State<PressureTimelapsePage> {
                   value: _frameIndex.toDouble(),
                   min: 0,
                   max: math.max(1, widget.frames.length - 1).toDouble(),
-                  divisions: widget.frames.length > 1
-                      ? widget.frames.length - 1
-                      : 1,
+                  divisions: widget.frames.length > 1 ? widget.frames.length - 1 : 1,
                   label: _clockLabel(frame.secondOfDay),
                   onChanged: (value) {
                     _playbackTimer?.cancel();
@@ -3646,9 +3898,7 @@ class _PressureTimelapsePageState extends State<PressureTimelapsePage> {
                     FilledButton.icon(
                       onPressed: _togglePlayback,
                       icon: Icon(
-                        _isPlaying
-                            ? Icons.pause_rounded
-                            : Icons.play_arrow_rounded,
+                        _isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
                       ),
                       label: Text(_isPlaying ? '일시정지' : '재생'),
                     ),
@@ -3821,8 +4071,7 @@ class _PostureHistoryPainter extends CustomPainter {
       ..color = const Color(0xffd39e00).withValues(alpha: .55)
       ..strokeWidth = 1;
 
-    double yFor(double value) =>
-        chart.center.dy - value.clamp(-1.0, 1.0) * chart.height / 2;
+    double yFor(double value) => chart.center.dy - value.clamp(-1.0, 1.0) * chart.height / 2;
     canvas.drawLine(
       Offset(chart.left, chart.center.dy),
       Offset(chart.right, chart.center.dy),
@@ -3874,9 +4123,7 @@ class _PostureHistoryPainter extends CustomPainter {
           .inMilliseconds
           .clamp(0, windowMilliseconds);
       final x = chart.left + chart.width * elapsed / windowMilliseconds;
-      final y =
-          chart.center.dy -
-          valueOf(samples[index]).clamp(-1.0, 1.0) * chart.height / 2;
+      final y = chart.center.dy - valueOf(samples[index]).clamp(-1.0, 1.0) * chart.height / 2;
       if (index == 0) {
         path.moveTo(x, y);
       } else {
@@ -4086,13 +4333,9 @@ class PressureGrid extends StatelessWidget {
                 ),
                 for (var index = 0; index < sensorValues.length; index++)
                   Positioned(
-                    left:
-                        PressureField.sensorPositions[index].dx * width -
-                        markerSize / 2,
+                    left: PressureField.sensorPositions[index].dx * width - markerSize / 2,
                     top:
-                        top +
-                        PressureField.sensorPositions[index].dy * bodyHeight -
-                        markerSize / 2,
+                        top + PressureField.sensorPositions[index].dy * bodyHeight - markerSize / 2,
                     width: markerSize,
                     height: markerSize,
                     child: _PressureSensorMarker(
@@ -4233,9 +4476,7 @@ class _PressureSensorMarker extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final intensity = (value / maximum).clamp(0.0, 1.0);
-    final markerColor = intensity > .72
-        ? AppColors.corporateYellow
-        : const Color(0xffe9e5d8);
+    final markerColor = intensity > .72 ? AppColors.corporateYellow : const Color(0xffe9e5d8);
 
     return Container(
       padding: const EdgeInsets.all(4),
@@ -4324,9 +4565,7 @@ class _StatusCard extends StatelessWidget {
                 borderRadius: BorderRadius.circular(2),
               ),
               child: Icon(
-                connected
-                    ? Icons.bluetooth_connected_rounded
-                    : Icons.bluetooth_disabled_rounded,
+                connected ? Icons.bluetooth_connected_rounded : Icons.bluetooth_disabled_rounded,
                 color: color,
               ),
             ),
@@ -4429,9 +4668,58 @@ class _SettingsTile extends StatelessWidget {
       leading: Icon(icon),
       title: Text(title, style: const TextStyle(fontWeight: FontWeight.w800)),
       subtitle: Text(description),
-      trailing: onTap == null || !enabled
-          ? null
-          : const Icon(Icons.chevron_right_rounded),
+      trailing: onTap == null || !enabled ? null : const Icon(Icons.chevron_right_rounded),
+    ),
+  );
+}
+
+class _AlertSensitivityCard extends StatelessWidget {
+  const _AlertSensitivityCard({required this.value, required this.onChanged});
+
+  final AlertSensitivity value;
+  final ValueChanged<AlertSensitivity> onChanged;
+
+  @override
+  Widget build(BuildContext context) => Card(
+    child: Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.sensors_rounded),
+              SizedBox(width: 12),
+              Text('자세 알림 민감도', style: TextStyle(fontWeight: FontWeight.w800)),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            switch (value) {
+              AlertSensitivity.low => '큰 자세 변화가 3초 이상 이어질 때 알려줍니다.',
+              AlertSensitivity.normal => '일상적인 움직임을 제외하고 2초 후 알려줍니다.',
+              AlertSensitivity.high => '작은 압력 변화도 감지해 약 1.5초 후 알려줍니다.',
+            },
+          ),
+          const SizedBox(height: 14),
+          SizedBox(
+            width: double.infinity,
+            child: SegmentedButton<AlertSensitivity>(
+              segments: AlertSensitivity.values
+                  .map(
+                    (item) => ButtonSegment<AlertSensitivity>(
+                      value: item,
+                      label: Text(item.label),
+                    ),
+                  )
+                  .toList(),
+              selected: {value},
+              showSelectedIcon: false,
+              onSelectionChanged: (selection) => onChanged(selection.single),
+            ),
+          ),
+        ],
+      ),
     ),
   );
 }
@@ -4553,9 +4841,7 @@ class _PressureSummary extends StatelessWidget {
     final peak = values.isEmpty
         ? 0.0
         : values.reduce((current, next) => current > next ? current : next);
-    final average = values.isEmpty
-        ? 0.0
-        : values.reduce((a, b) => a + b) / values.length;
+    final average = values.isEmpty ? 0.0 : values.reduce((a, b) => a + b) / values.length;
     final active = values.where((value) => value >= 100).length;
     return Container(
       padding: const EdgeInsets.all(18),

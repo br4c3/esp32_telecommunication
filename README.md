@@ -1,8 +1,36 @@
 # esp32_telecommunication
 # ESP32 Flutter BLE Terminal
 
+## Integrated web routes
+
+The web deployment keeps the existing Firebase user and BLE domain while
+splitting the administrator UI onto its own route:
+
+- `/user`: the existing authenticated Flutter user app
+- `/admin`: the Seat Care administrator UI for status, requests, and records
+
+The user app in `apps/user-flutter` uses the cream and green Seat Care visual
+tokens while preserving its authentication, BLE, and posture-history behavior. Administrator actions acknowledge a
+shared help request or pressure alert and never mutate sensor readings.
+
+Build both routes into `apps/dist` before deploying Firebase Hosting:
+
+```sh
+cd apps
+npm install
+npm run build
+cd ..
+npx firebase-tools deploy --only hosting
+```
+
+The Firebase Functions API lives in `apps/api`, and Firebase Hosting routes
+`/api/**` to the deployed `api` function.
+
 This repository contains an ESP32 Arduino sketch and a Flutter mobile app that
 communicate over Bluetooth Low Energy (BLE).
+
+자세 판정, 알림 민감도, 케어 알림 및 압력 지도에 사용하는 수식은
+[FORMULAS.md](FORMULAS.md)에 정리되어 있습니다.
 
 ## Protocol
 
@@ -44,7 +72,7 @@ Arduino Serial Monitor at 115200 baud.
 4. From the repository root, run:
 
    ```sh
-   cd app
+   cd apps/user-flutter
    flutter pub get
    flutter run
    ```
@@ -58,7 +86,7 @@ Arduino Serial Monitor at 115200 baud.
 To run it as a native macOS app instead, use:
 
 ```sh
-cd app
+cd apps/user-flutter
 flutter run -d macos
 ```
 
